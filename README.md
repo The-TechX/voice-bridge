@@ -1,6 +1,6 @@
 # voice-bridge
 
-Minimal, Dockerized voice bridge for experimenting with web voice interfaces and pluggable agent backends.
+Minimal, Dockerized voice bridge for experimenting with browser voice interfaces and pluggable agent backends.
 
 ## Increment 1 — Web STT
 
@@ -10,38 +10,41 @@ Current flow:
 Microphone -> Browser Web Speech API -> transcript in the web app
 ```
 
-The backend only serves the application in this increment. There is intentionally no TTS, Fish Audio, agent runtime, LLM, or external STT API yet.
+This increment is intentionally small. It includes:
 
-### Why browser STT first?
+- Mobile-first web UI
+- Microphone permission request
+- Push-to-talk interaction
+- Interim and final transcription
+- Docker deployment
+- Tailnet-only HTTPS access through Tailscale Serve
 
-It validates microphone permissions, UX, continuous recognition, partial/final transcripts, Docker deployment, and Tailscale access without introducing API keys or usage costs.
+It does not include TTS, an agent runtime, an LLM, or an external STT provider yet.
 
-### Run
+## Run
 
 ```bash
 cp .env.example .env
-# Set BIND_ADDR to CME-01's Tailscale IPv4.
+# Set the desired local bind address if needed.
 docker compose up -d --build
 ```
 
-Open:
+The container listens on port `8000` internally. By default, Compose publishes the app on `127.0.0.1:8765`.
 
-```text
-http://<CME_TAILSCALE_IP>:8765
-```
+For this experiment, Tailscale Serve proxies HTTPS traffic from the node hostname to the local container endpoint.
 
-### Browser support
+## Browser support
 
-This first increment uses `SpeechRecognition` / `webkitSpeechRecognition`, so Chromium-based browsers such as Chrome or Edge are the intended test clients.
+The first increment uses `SpeechRecognition` / `webkitSpeechRecognition`, so Chromium-based browsers such as Chrome or Edge are the intended clients.
 
-### Endpoints
+## Endpoints
 
 - `GET /` — web app
 - `GET /health` — service health
 
-### Next increments
+## Next increments
 
-Planned architecture can replace browser STT with a server-side provider without changing the rest of the voice bridge:
+A future server-side voice pipeline can replace browser STT without changing the overall shape of the application:
 
 ```text
 Browser microphone -> audio stream -> STT adapter -> agent runtime -> TTS adapter -> browser audio

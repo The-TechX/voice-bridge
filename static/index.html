@@ -1,131 +1,165 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#07101d" />
+  <meta name="theme-color" content="#0a0a0b" />
   <title>TCHX Voice</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #050912;
-      --panel: rgba(11, 18, 32, .52);
-      --line: rgba(143, 178, 255, .18);
-      --text: #f7f9ff;
-      --muted: #95a5c4;
-      --cyan: #63d8ff;
-      --blue: #6f8cff;
-      --violet: #ad7cff;
-      --pink: #ff7de8;
-      --green: #4de7ae;
+      --bg: #0a0a0b;
+      --panel: #111214;
+      --line: #25272b;
+      --text: #f5f7fa;
+      --muted: #8d939d;
+      --accent: #ffffff;
     }
 
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { min-height: 100svh; overflow: hidden; }
+    body { min-height: 100svh; }
 
-    .app {
-      position: relative;
+    main {
       min-height: 100svh;
+      display: flex;
+      flex-direction: column;
       padding: max(18px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
-      overflow: hidden;
-      background:
-        radial-gradient(circle at 50% 42%, rgba(85, 105, 255, .13), transparent 31%),
-        radial-gradient(circle at 50% 48%, rgba(130, 83, 255, .12), transparent 44%),
-        linear-gradient(180deg, #06101c 0%, #050912 56%, #04070d 100%);
     }
 
-    canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
-    .noise { position:absolute; inset:0; pointer-events:none; opacity:.12; z-index:1; background-image: radial-gradient(rgba(255,255,255,.5) .55px, transparent .7px); background-size: 5px 5px; mask-image: linear-gradient(to bottom, transparent, #000 20%, #000 80%, transparent); }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 44px;
+    }
 
-    .content { position: relative; z-index: 2; min-height: calc(100svh - 36px); display: flex; flex-direction: column; }
+    .brand { font-size: 14px; font-weight: 600; letter-spacing: .08em; }
+    .status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #45d79c; }
 
-    header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
-    .brand { letter-spacing: .34em; font-size: 11px; color: #a9bcff; }
-    .brand strong { display:block; letter-spacing:.2em; font-size: 24px; font-weight: 500; color: white; line-height:1; margin-bottom:6px; }
-    .status { display:flex; align-items:center; gap:9px; padding-top:2px; font-size:12px; color:var(--muted); text-align:right; }
-    .dot { width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 14px rgba(77,231,174,.85); flex:none; }
+    .center {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: 18px;
+      padding: 24px 0;
+    }
 
-    .hero { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; margin-top:-14px; }
-    .copy h1 { margin:0; font-size: clamp(36px, 9.3vw, 58px); font-weight: 300; letter-spacing:-.035em; }
-    .copy p { margin:9px 0 0; color:var(--muted); font-size: clamp(16px, 4.4vw, 21px); }
-
-    .voice-stage { position:relative; width:min(88vw, 430px); aspect-ratio:1; margin:20px auto 12px; display:grid; place-items:center; }
+    .eyebrow { color: var(--muted); font-size: 13px; }
+    h1 { margin: 0; font-size: clamp(30px, 9vw, 48px); font-weight: 500; letter-spacing: -.03em; }
+    .sub { margin: 0; max-width: 320px; color: var(--muted); font-size: 15px; line-height: 1.5; }
 
     .mic {
-      position:relative; z-index:5;
-      width:112px; height:112px; border-radius:50%;
-      border:1px solid rgba(210,224,255,.72);
-      background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.16), rgba(74,102,255,.15) 48%, rgba(13,22,42,.84) 76%);
-      box-shadow: 0 0 0 13px rgba(80,104,255,.035), 0 0 42px rgba(91,119,255,.35), inset 0 0 30px rgba(118,157,255,.17);
-      display:grid; place-items:center; cursor:pointer; touch-action:none; user-select:none;
-      transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+      width: 124px;
+      height: 124px;
+      border-radius: 50%;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      touch-action: none;
+      user-select: none;
+      transition: transform .15s ease, background .15s ease, border-color .15s ease;
     }
-    .mic:active, .mic.listening { transform:scale(.96); border-color:#d8e6ff; box-shadow:0 0 0 17px rgba(80,104,255,.055), 0 0 64px rgba(91,119,255,.62), 0 0 90px rgba(180,97,255,.25), inset 0 0 34px rgba(118,157,255,.25); }
-    .mic svg { width:40px; height:40px; filter:drop-shadow(0 0 12px rgba(130,183,255,.7)); }
 
-    .hint { color:#cdd8ee; font-size:14px; margin-top:8px; }
-    .hint span { color:#7f91b4; }
+    .mic:active,
+    .mic.listening {
+      transform: scale(.96);
+      background: #1a1c20;
+      border-color: #4b4f56;
+    }
 
-    .transcript-wrap { width:min(92vw, 560px); min-height:84px; margin-top:16px; padding:14px 16px; border:1px solid var(--line); border-radius:22px; background:linear-gradient(180deg, rgba(16,26,45,.72), rgba(10,17,31,.48)); backdrop-filter: blur(18px); box-shadow: inset 0 1px rgba(255,255,255,.04); }
-    .transcript-label { display:flex; justify-content:space-between; gap:12px; font-size:11px; text-transform:uppercase; letter-spacing:.16em; color:#7084aa; margin-bottom:8px; }
-    .transcript { font-size:16px; line-height:1.45; min-height:25px; color:#eef3ff; }
-    .interim { color:#8193b8; }
+    .mic svg { width: 42px; height: 42px; }
 
-    footer { display:flex; align-items:center; justify-content:space-between; gap:14px; color:#7183a5; font-size:11px; padding-top:10px; }
-    .pulse { display:flex; align-items:center; gap:3px; height:18px; }
-    .pulse i { width:2px; border-radius:3px; background:linear-gradient(var(--cyan), var(--violet)); animation: bars 1.2s ease-in-out infinite; opacity:.7; }
-    .pulse i:nth-child(1){height:7px}.pulse i:nth-child(2){height:14px;animation-delay:.12s}.pulse i:nth-child(3){height:10px;animation-delay:.24s}.pulse i:nth-child(4){height:17px;animation-delay:.36s}.pulse i:nth-child(5){height:8px;animation-delay:.48s}
+    .hint { color: var(--muted); font-size: 12px; }
 
-    @keyframes bars { 0%,100%{transform:scaleY(.45);opacity:.45} 50%{transform:scaleY(1);opacity:1} }
+    .transcript-card {
+      width: 100%;
+      max-width: 520px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 16px;
+      padding: 14px 15px;
+      text-align: left;
+    }
 
-    @media (min-width: 760px) {
-      .app { padding-left:34px; padding-right:34px; }
-      .content { min-height: calc(100svh - 52px); }
-      .voice-stage { width:min(58vh, 520px); }
-      .mic { width:128px; height:128px; }
-      .transcript-wrap { margin-top:8px; }
-      footer { font-size:12px; }
+    .transcript-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+
+    .transcript {
+      min-height: 24px;
+      color: var(--text);
+      font-size: 16px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+
+    .interim { color: var(--muted); }
+
+    footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 36px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    @media (min-width: 720px) {
+      main { padding-left: 32px; padding-right: 32px; }
+      .center { gap: 20px; }
+      .mic { width: 136px; height: 136px; }
     }
   </style>
 </head>
 <body>
-  <main class="app">
-    <canvas id="field"></canvas>
-    <div class="noise"></div>
-    <section class="content">
-      <header>
-        <div class="brand"><strong>TCHX</strong>VOICE</div>
-        <div class="status"><span class="dot"></span><div><b style="color:#e6ecfa;font-weight:500">Conectado</b><br>CME-01</div></div>
-      </header>
+  <main>
+    <header>
+      <div class="brand">TCHX VOICE</div>
+      <div class="status"><span class="dot"></span><span>Connected</span></div>
+    </header>
 
-      <section class="hero">
-        <div class="copy">
-          <h1 id="headline">Te escucho…</h1>
-          <p id="subline">Mantén presionado para hablar</p>
-        </div>
+    <section class="center">
+      <div class="eyebrow">Browser speech recognition</div>
+      <h1 id="headline">Push to talk</h1>
+      <p class="sub" id="subline">Press and hold the button while you speak. Release to stop.</p>
 
-        <div class="voice-stage">
-          <button class="mic" id="mic" aria-label="Mantén presionado para hablar">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path>
-            </svg>
-          </button>
-        </div>
+      <button class="mic" id="mic" aria-label="Press and hold to talk">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="3" width="6" height="11" rx="3"></rect>
+          <path d="M5 11a7 7 0 0 0 14 0"></path>
+          <path d="M12 18v3"></path>
+        </svg>
+      </button>
 
-        <div class="hint" id="hint">Push to talk · <span>suelta para detener</span></div>
+      <div class="hint">Hold to speak · release to stop</div>
 
-        <div class="transcript-wrap">
-          <div class="transcript-label"><span>Transcripción</span><span id="state">Listo</span></div>
-          <div class="transcript"><span id="final"></span><span class="interim" id="interim"></span></div>
-        </div>
-      </section>
-
-      <footer>
-        <div style="display:flex;align-items:center;gap:9px"><span class="pulse"><i></i><i></i><i></i><i></i><i></i></span><span>STT activo</span></div>
-        <span>Privado · Tailscale</span>
-      </footer>
+      <div class="transcript-card">
+        <div class="transcript-head"><span>Transcript</span><span id="state">Ready</span></div>
+        <div class="transcript"><span id="final"></span><span class="interim" id="interim"></span></div>
+      </div>
     </section>
+
+    <footer>
+      <span>STT ready</span>
+      <span>Private via Tailscale</span>
+    </footer>
   </main>
 
   <script>
@@ -136,41 +170,42 @@
     const state = document.querySelector('#state');
     const finalText = document.querySelector('#final');
     const interimText = document.querySelector('#interim');
+
     let recognition;
     let listening = false;
     let committed = '';
 
-    async function primeMicPermission() {
+    async function requestMicrophonePermission() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach(t => t.stop());
-        state.textContent = 'Micrófono listo';
-      } catch (e) {
-        state.textContent = 'Permiso requerido';
-        subline.textContent = 'Permite el micrófono para comenzar';
+        stream.getTracks().forEach(track => track.stop());
+        state.textContent = 'Ready';
+      } catch {
+        state.textContent = 'Permission needed';
+        subline.textContent = 'Allow microphone access, then press and hold to speak.';
       }
     }
 
     if (!SpeechRecognition) {
       mic.disabled = true;
-      headline.textContent = 'STT no disponible';
-      subline.textContent = 'Usa Chrome o Edge';
-      state.textContent = 'No compatible';
+      headline.textContent = 'Speech recognition unavailable';
+      subline.textContent = 'Use Chrome or Edge for this experiment.';
+      state.textContent = 'Unsupported';
     } else {
       recognition = new SpeechRecognition();
-      recognition.lang = 'es-MX';
+      recognition.lang = 'en-US';
       recognition.continuous = true;
       recognition.interimResults = true;
 
       recognition.onstart = () => {
         listening = true;
         mic.classList.add('listening');
-        headline.textContent = 'Te escucho…';
-        subline.textContent = 'Habla naturalmente';
-        state.textContent = 'Escuchando';
+        headline.textContent = 'Listening';
+        subline.textContent = 'Keep holding while you speak.';
+        state.textContent = 'Listening';
       };
 
-      recognition.onresult = (event) => {
+      recognition.onresult = event => {
         let interim = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const text = event.results[i][0].transcript;
@@ -181,7 +216,7 @@
         interimText.textContent = interim;
       };
 
-      recognition.onerror = (event) => {
+      recognition.onerror = event => {
         if (event.error !== 'aborted') state.textContent = `Error: ${event.error}`;
       };
 
@@ -189,122 +224,34 @@
         listening = false;
         mic.classList.remove('listening');
         interimText.textContent = '';
-        headline.textContent = 'Listo para ti';
-        subline.textContent = 'Mantén presionado para hablar';
-        if (!state.textContent.startsWith('Error')) state.textContent = 'Listo';
+        headline.textContent = 'Push to talk';
+        subline.textContent = 'Press and hold the button while you speak. Release to stop.';
+        if (!state.textContent.startsWith('Error')) state.textContent = 'Ready';
       };
 
-      const start = (e) => {
-        e.preventDefault();
+      const start = event => {
+        event.preventDefault();
         if (!listening) {
-          try { recognition.start(); } catch (_) {}
+          try { recognition.start(); } catch {}
         }
       };
-      const stop = (e) => {
-        e.preventDefault();
+
+      const stop = event => {
+        event.preventDefault();
         if (listening) recognition.stop();
       };
 
-      ['pointerdown'].forEach(evt => mic.addEventListener(evt, start));
-      ['pointerup','pointercancel','pointerleave'].forEach(evt => mic.addEventListener(evt, stop));
-      mic.addEventListener('keydown', e => { if ((e.code === 'Space' || e.code === 'Enter') && !e.repeat) start(e); });
-      mic.addEventListener('keyup', e => { if (e.code === 'Space' || e.code === 'Enter') stop(e); });
-
-      window.addEventListener('load', primeMicPermission, { once:true });
-    }
-
-    // Animated particle sphere with wave-like deformation
-    const canvas = document.querySelector('#field');
-    const ctx = canvas.getContext('2d');
-    const DPR = Math.min(window.devicePixelRatio || 1, 2);
-    let W, H, points = [];
-
-    function resize() {
-      W = canvas.width = Math.floor(innerWidth * DPR);
-      H = canvas.height = Math.floor(innerHeight * DPR);
-      canvas.style.width = innerWidth + 'px';
-      canvas.style.height = innerHeight + 'px';
-
-      const count = innerWidth < 760 ? 520 : 820;
-      points = Array.from({ length: count }, () => {
-        const u = Math.random();
-        const v = Math.random();
-        const theta = 2 * Math.PI * u;
-        const phi = Math.acos(2 * v - 1);
-        return {
-          theta,
-          phi,
-          size: .65 + Math.random() * 2.2,
-          speed: .00012 + Math.random() * .00022,
-          phase: Math.random() * Math.PI * 2,
-          hue: 195 + Math.random() * 95
-        };
+      mic.addEventListener('pointerdown', start);
+      ['pointerup', 'pointercancel', 'pointerleave'].forEach(type => mic.addEventListener(type, stop));
+      mic.addEventListener('keydown', event => {
+        if ((event.code === 'Space' || event.code === 'Enter') && !event.repeat) start(event);
       });
+      mic.addEventListener('keyup', event => {
+        if (event.code === 'Space' || event.code === 'Enter') stop(event);
+      });
+
+      window.addEventListener('load', requestMicrophonePermission, { once: true });
     }
-
-    function rotateY(x, z, a) {
-      return [x * Math.cos(a) - z * Math.sin(a), x * Math.sin(a) + z * Math.cos(a)];
-    }
-
-    function rotateX(y, z, a) {
-      return [y * Math.cos(a) - z * Math.sin(a), y * Math.sin(a) + z * Math.cos(a)];
-    }
-
-    function draw(t) {
-      ctx.clearRect(0, 0, W, H);
-
-      const cx = W * .5;
-      const cy = H * (innerWidth < 760 ? .455 : .49);
-      const radius = Math.min(W, H) * (innerWidth < 760 ? .29 : .31);
-      const listenBoost = listening ? 1.12 : 1;
-      const rotY = t * .00011;
-      const rotX = -.18 + Math.sin(t * .00022) * .035;
-
-      const rendered = points.map((p, i) => {
-        const wave =
-          Math.sin(p.phi * 5.5 - t * .0017 + p.phase) * .055 +
-          Math.sin(p.theta * 3.3 + t * .00125 + p.phase * .7) * .04 +
-          Math.sin((p.theta + p.phi) * 2.2 - t * .00095) * .028;
-
-        const r = radius * (1 + wave * listenBoost);
-        let x = r * Math.sin(p.phi) * Math.cos(p.theta + t * p.speed);
-        let y = r * Math.cos(p.phi);
-        let z = r * Math.sin(p.phi) * Math.sin(p.theta + t * p.speed);
-
-        [x, z] = rotateY(x, z, rotY);
-        [y, z] = rotateX(y, z, rotX);
-
-        const perspective = 1 / (1.15 - z / (radius * 3.2));
-        return {
-          x: cx + x * perspective,
-          y: cy + y * perspective,
-          z,
-          perspective,
-          size: p.size,
-          hue: p.hue,
-          alpha: .28 + .62 * ((z / radius + 1) / 2)
-        };
-      }).sort((a, b) => a.z - b.z);
-
-      ctx.globalCompositeOperation = 'lighter';
-      for (const p of rendered) {
-        const alpha = Math.min(1, p.alpha * (listening ? 1.12 : 1));
-        const size = p.size * p.perspective * DPR * (listening ? 1.08 : 1);
-        ctx.fillStyle = `hsla(${p.hue}, 95%, ${62 + p.perspective * 12}%, ${alpha})`;
-        ctx.shadowBlur = 7 * DPR * p.perspective;
-        ctx.shadowColor = `hsla(${p.hue}, 100%, 70%, ${alpha * .8})`;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.shadowBlur = 0;
-      ctx.globalCompositeOperation = 'source-over';
-      requestAnimationFrame(draw);
-    }
-
-    resize();
-    addEventListener('resize', resize);
-    requestAnimationFrame(draw);
   </script>
 </body>
 </html>
