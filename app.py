@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Set
 
 import httpx
-from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -26,6 +26,8 @@ FISH_TTS_URL = "https://api.fish.audio/v1/tts"
 FISH_MODEL = "s2.1-pro-free"
 AGENT_URL = os.getenv("AGENT_URL", "").rstrip("/")
 AGENT_TIMEOUT_SECONDS = float(os.getenv("AGENT_TIMEOUT_SECONDS", "60"))
+STT_URL = os.getenv("STT_URL", "").rstrip("/")
+STT_TIMEOUT_SECONDS = float(os.getenv("STT_TIMEOUT_SECONDS", "30"))
 
 clients: Set[WebSocket] = set()
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -117,12 +119,47 @@ async def health():
         "status": "ok",
         "increment": "agent-session-bridge",
         "agent_configured": bool(AGENT_URL),
+        "stt_configured": bool(STT_URL),
         "tts_configured": bool(os.getenv("FISH_API_KEY")),
         "push_configured": bool(VAPID_PUBLIC_KEY and Path(VAPID_PRIVATE_KEY).exists()),
         "connected_clients": len(clients),
         "push_subscriptions": subscriptions,
         "pending_messages": pending,
     }
+
+
+@app.post("/stt/transcribe")
+async def stt_transcribe(file: UploadFile = File(...)):
+    if not STT_URL:
+        raise HTTPException(status_code=503, detail="STT_URL is not configured")
+
+    audio = await file.read()
+    if not audio:
+        raise HTTPException(status_code=400, detail="Audio payload is empty")
+
+    filename = file.filename or "speech.audio"
+    content_type = file.content_type or "application/octet-stream"
+    try:
+        async with httpx.AsyncClient(timeout=STT_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{STT_URL}/transcribe",
+                params={"language": "es"},
+                files={"file": (filename, audio, content_type)},
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500] or f"STT returned HTTP {exc.response.status_code}"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"STT request failed: {exc}") from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="STT returned invalid JSON") from exc
+
+    text = str(payload.get("text", "")).strip()
+    return {"status": "ok", "text": text, "stt": payload}
 
 
 @app.post("/agent/turn")
