@@ -4,6 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0a0a0b" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="TCHX Voice" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/static/icon-192.png" />
   <title>TCHX Voice</title>
   <style>
     :root {
@@ -80,6 +85,36 @@
 
     .hint { color: var(--muted); font-size: 12px; }
 
+    .alert-button {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 10px 16px;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .alert-button.enabled {
+      color: #45d79c;
+      border-color: #2e6952;
+    }
+
+    .notify-button {
+      display: none;
+      border: 1px solid #4b4f56;
+      border-radius: 999px;
+      padding: 12px 18px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .notify-button.visible { display: inline-flex; align-items: center; gap: 8px; }
+
     .transcript-card {
       width: 100%;
       max-width: 520px;
@@ -149,6 +184,8 @@
       </button>
 
       <div class="hint">Hold to speak · release to stop</div>
+      <button class="alert-button" id="alerts" type="button">Enable alerts</button>
+      <button class="notify-button" id="notify" type="button">▶ Play notification</button>
 
       <div class="transcript-card">
         <div class="transcript-head"><span>Transcript</span><span id="state">Ready</span></div>
@@ -170,19 +207,27 @@
     const state = document.querySelector('#state');
     const finalText = document.querySelector('#final');
     const interimText = document.querySelector('#interim');
+    const alertsButton = document.querySelector('#alerts');
+    const notifyButton = document.querySelector('#notify');
 
     let recognition;
     let listening = false;
     let committed = '';
+    let pendingMessageId = null;
+    let incomingMessageId = null;
+    let microphoneGranted = false;
 
-    async function requestMicrophonePermission() {
+    async function ensureMicrophonePermission() {
+      if (microphoneGranted) return true;
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         stream.getTracks().forEach(track => track.stop());
-        state.textContent = 'Ready';
+        microphoneGranted = true;
+        return true;
       } catch {
-        state.textContent = 'Permission needed';
-        subline.textContent = 'Allow microphone access, then press and hold to speak.';
+        state.textContent = 'Microphone permission needed';
+        subline.textContent = 'Allow microphone access to use push to talk.';
+        return false;
       }
     }
 
@@ -229,9 +274,11 @@
         if (!state.textContent.startsWith('Error')) state.textContent = 'Ready';
       };
 
-      const start = event => {
+      const start = async event => {
         event.preventDefault();
         if (!listening) {
+          const allowed = await ensureMicrophonePermission();
+          if (!allowed) return;
           try { recognition.start(); } catch {}
         }
       };
@@ -250,7 +297,6 @@
         if (event.code === 'Space' || event.code === 'Enter') stop(event);
       });
 
-      window.addEventListener('load', requestMicrophonePermission, { once: true });
     }
 
     const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -260,6 +306,89 @@
     let voiceSocket;
     let audioUnlocked = false;
 
+    function urlBase64ToUint8Array(base64String) {
+      const padding = '='.repeat((4 - base64String.length % 4) % 4);
+      const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const rawData = atob(base64);
+      return Uint8Array.from([...rawData].map(char => char.charCodeAt(0)));
+    }
+
+    async function registerServiceWorker() {
+      if (!('serviceWorker' in navigator)) {
+        alertsButton.disabled = true;
+        alertsButton.textContent = 'Alerts unsupported';
+        return null;
+      }
+      const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      await navigator.serviceWorker.ready;
+      return registration;
+    }
+
+    async function refreshAlertState() {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+        alertsButton.disabled = true;
+        alertsButton.textContent = 'Alerts unsupported';
+        return;
+      }
+      try {
+        const registration = await registerServiceWorker();
+        const subscription = await registration.pushManager.getSubscription();
+        if (subscription && Notification.permission === 'granted') {
+          alertsButton.textContent = 'Alerts enabled';
+          alertsButton.classList.add('enabled');
+        }
+      } catch {
+        alertsButton.textContent = 'Enable alerts';
+      }
+    }
+
+    async function enableAlerts() {
+      try {
+        const registration = await registerServiceWorker();
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') {
+          alertsButton.textContent = 'Alerts blocked';
+          return;
+        }
+
+        const keyResponse = await fetch('/push/public-key');
+        if (!keyResponse.ok) throw new Error('Push key unavailable');
+        const { public_key: publicKey } = await keyResponse.json();
+
+        let subscription = await registration.pushManager.getSubscription();
+        if (!subscription) {
+          subscription = await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(publicKey),
+          });
+        }
+
+        const response = await fetch('/push/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(subscription.toJSON()),
+        });
+        if (!response.ok) throw new Error('Subscription failed');
+
+        alertsButton.textContent = 'Alerts enabled';
+        alertsButton.classList.add('enabled');
+        state.textContent = 'Alerts ready';
+      } catch (error) {
+        console.error(error);
+        state.textContent = 'Alert setup failed';
+      }
+    }
+
+    alertsButton.addEventListener('click', enableAlerts);
+
+    async function acknowledgeMessage(messageId) {
+      if (!messageId) return;
+      try {
+        await fetch(`/messages/${encodeURIComponent(messageId)}/ack`, { method: 'POST' });
+        if ('clearAppBadge' in navigator) await navigator.clearAppBadge();
+      } catch {}
+    }
+
     async function unlockAudio() {
       if (!audioContext) return;
       try {
@@ -268,7 +397,8 @@
         if (audioUnlocked) {
           state.textContent = listening ? 'Listening' : 'Ready';
           while (pendingAudio.length) {
-            await playAudioBuffer(pendingAudio.shift());
+            const item = pendingAudio.shift();
+            await playAudioBuffer(item.arrayBuffer, item.messageId);
           }
         }
       } catch {
@@ -276,10 +406,10 @@
       }
     }
 
-    async function playAudioBuffer(arrayBuffer) {
+    async function playAudioBuffer(arrayBuffer, messageId = null) {
       if (!audioContext || !audioUnlocked) {
-        pendingAudio.push(arrayBuffer);
-        state.textContent = 'Tap to enable audio';
+        pendingAudio.push({ arrayBuffer, messageId });
+        state.textContent = messageId ? 'Tap to hear alert' : 'Tap to enable audio';
         return;
       }
 
@@ -288,11 +418,63 @@
         const source = audioContext.createBufferSource();
         source.buffer = decoded;
         source.connect(audioContext.destination);
+        source.onended = () => acknowledgeMessage(messageId);
         source.start();
+        state.textContent = messageId ? 'Playing alert' : 'Speaking';
       } catch {
         state.textContent = 'Audio playback failed';
       }
     }
+
+    async function playMessage(messageId) {
+      if (!messageId) return;
+      try {
+        const response = await fetch(`/messages/${encodeURIComponent(messageId)}/audio`, { cache: 'no-store' });
+        if (!response.ok) throw new Error('Message audio unavailable');
+        await unlockAudio();
+        await playAudioBuffer(await response.arrayBuffer(), messageId);
+      } catch (error) {
+        console.error(error);
+        state.textContent = 'Alert playback failed';
+      }
+    }
+
+    function showPendingNotification(messageId) {
+      if (!messageId) return;
+      pendingMessageId = messageId;
+      notifyButton.classList.add('visible');
+      state.textContent = 'Notification waiting';
+    }
+
+    function clearPendingNotification() {
+      pendingMessageId = null;
+      notifyButton.classList.remove('visible');
+    }
+
+    async function discoverPendingMessage() {
+      const params = new URLSearchParams(location.search);
+      const requestedId = params.get('message');
+      if (requestedId) {
+        showPendingNotification(requestedId);
+        history.replaceState({}, '', '/');
+        return;
+      }
+
+      try {
+        const response = await fetch('/messages/pending', { cache: 'no-store' });
+        if (!response.ok) return;
+        const { message } = await response.json();
+        if (message?.id) showPendingNotification(message.id);
+      } catch {}
+    }
+
+    notifyButton.addEventListener('click', async () => {
+      if (!pendingMessageId) return;
+      const messageId = pendingMessageId;
+      await unlockAudio();
+      await playMessage(messageId);
+      clearPendingNotification();
+    });
 
     document.addEventListener('pointerdown', unlockAudio, { passive: true });
     document.addEventListener('keydown', unlockAudio);
@@ -306,13 +488,24 @@
       };
 
       voiceSocket.onmessage = event => {
-        if (event.data instanceof ArrayBuffer) {
-          playAudioBuffer(event.data);
+        if (typeof event.data === 'string') {
+          try {
+            const message = JSON.parse(event.data);
+            if (message.type === 'voice-message' && message.message_id) {
+              incomingMessageId = message.message_id;
+            }
+          } catch {}
           return;
         }
 
+        const messageId = incomingMessageId;
+        incomingMessageId = null;
+        if (event.data instanceof ArrayBuffer) {
+          playAudioBuffer(event.data, messageId);
+          return;
+        }
         if (event.data instanceof Blob) {
-          event.data.arrayBuffer().then(playAudioBuffer);
+          event.data.arrayBuffer().then(buffer => playAudioBuffer(buffer, messageId));
         }
       };
 
@@ -322,6 +515,8 @@
     }
 
     connectVoiceChannel();
+    refreshAlertState();
+    discoverPendingMessage();
   </script>
 </body>
 </html>
