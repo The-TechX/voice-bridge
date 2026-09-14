@@ -115,3 +115,46 @@ Persistent browser voice-output channel. Binary messages are MP3 payloads genera
 ## Browser support
 
 The STT experiment uses `SpeechRecognition` / `webkitSpeechRecognition`, so Chromium-based browsers such as Chrome or Edge are the intended clients.
+
+## PWA push alerts
+
+Voice Bridge can be installed as a Progressive Web App and receive Web Push alerts while the UI is not open.
+
+Alert flow:
+
+```text
+POST /messages
+    -> persist pending message
+    -> Web Push notification
+    -> user taps notification
+    -> Voice Bridge opens
+    -> GET /messages/{id}/audio
+    -> Fish Audio TTS
+    -> browser playback
+    -> POST /messages/{id}/ack
+```
+
+### iPhone / iPad setup
+
+1. Open the HTTPS Voice Bridge URL in Safari.
+2. Add it to the Home Screen and open the installed `TCHX Voice` app.
+3. Tap `Enable alerts` and allow notifications.
+4. Lock the phone.
+5. Send a message through `POST /messages`.
+6. Tap the notification to open Voice Bridge and hear the pending message.
+
+Web Push on iOS/iPadOS requires the web app to be installed on the Home Screen and notification permission must be requested from a direct user interaction.
+
+### Send an alert
+
+```bash
+curl -X POST http://127.0.0.1:8765/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"TCHX Voice","text":"CME-01 requires your attention."}'
+```
+
+### Push configuration
+
+A VAPID private key is stored locally under `data/` and is never committed. The corresponding public key is configured in `.env` as `VAPID_PUBLIC_KEY`.
+
+Persistent runtime state is stored in `data/voice_bridge.db`, including push subscriptions and pending messages.

@@ -8,3 +8,9 @@ services:
     environment:
       FISH_API_KEY: ${FISH_API_KEY:-}
       FISH_REFERENCE_ID: ${FISH_REFERENCE_ID:-}
+      VAPID_PRIVATE_KEY: /app/data/vapid_private.pem
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:push@tchx.dev}
+      VOICE_BRIDGE_DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data

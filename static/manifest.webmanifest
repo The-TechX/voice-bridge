@@ -1,0 +1,15 @@
+{
+  "id": "/",
+  "name": "TCHX Voice",
+  "short_name": "TCHX Voice",
+  "description": "Private voice bridge for TCHX agents and alerts.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#05070a",
+  "theme_color": "#05070a",
+  "icons": [
+    {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+    {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
