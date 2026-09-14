@@ -268,6 +268,7 @@
         if (event.code === 'Space' || event.code === 'Enter') stop(event);
       });
 
+      window.addEventListener('load', ensureMicrophonePermission, { once: true });
     }
 
     async function sendToAgent(text) {
