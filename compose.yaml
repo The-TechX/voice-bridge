@@ -4,4 +4,4 @@ services:
     container_name: voice-bridge
     restart: unless-stopped
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8765}:8000"
+      - "${BIND_ADDR:-127.0.0.1}:${VOICE_BRIDGE_PORT:-8765}:8000"
