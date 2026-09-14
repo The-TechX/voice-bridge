@@ -2,97 +2,282 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TCHX Voice Bridge</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#07101d" />
+  <title>TCHX Voice</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0d1117; color: #f0f6fc; }
-    main { width: min(720px, calc(100% - 32px)); }
-    .card { border: 1px solid #30363d; border-radius: 18px; padding: 24px; background: #161b22; box-shadow: 0 18px 50px rgba(0,0,0,.25); }
-    h1 { margin: 0 0 8px; font-size: 1.55rem; }
-    p { color: #8b949e; margin-top: 0; }
-    button { width: 100%; border: 0; border-radius: 12px; padding: 14px 16px; font: inherit; font-weight: 700; cursor: pointer; background: #f0f6fc; color: #0d1117; }
-    button.listening { background: #ff7b72; color: #0d1117; }
-    #status { min-height: 24px; margin: 14px 0 0; font-size: .92rem; color: #8b949e; }
-    .label { margin: 22px 0 8px; font-size: .85rem; color: #8b949e; }
-    #transcript { min-height: 150px; white-space: pre-wrap; border-radius: 12px; border: 1px solid #30363d; background: #0d1117; padding: 14px; line-height: 1.5; }
-    #interim { color: #8b949e; }
-    code { font-size: .85rem; }
+    :root {
+      color-scheme: dark;
+      --bg: #050912;
+      --panel: rgba(11, 18, 32, .52);
+      --line: rgba(143, 178, 255, .18);
+      --text: #f7f9ff;
+      --muted: #95a5c4;
+      --cyan: #63d8ff;
+      --blue: #6f8cff;
+      --violet: #ad7cff;
+      --pink: #ff7de8;
+      --green: #4de7ae;
+    }
+
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { min-height: 100svh; overflow: hidden; }
+
+    .app {
+      position: relative;
+      min-height: 100svh;
+      padding: max(18px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 42%, rgba(85, 105, 255, .13), transparent 31%),
+        radial-gradient(circle at 50% 48%, rgba(130, 83, 255, .12), transparent 44%),
+        linear-gradient(180deg, #06101c 0%, #050912 56%, #04070d 100%);
+    }
+
+    canvas { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
+    .noise { position:absolute; inset:0; pointer-events:none; opacity:.12; z-index:1; background-image: radial-gradient(rgba(255,255,255,.5) .55px, transparent .7px); background-size: 5px 5px; mask-image: linear-gradient(to bottom, transparent, #000 20%, #000 80%, transparent); }
+
+    .content { position: relative; z-index: 2; min-height: calc(100svh - 36px); display: flex; flex-direction: column; }
+
+    header { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
+    .brand { letter-spacing: .34em; font-size: 11px; color: #a9bcff; }
+    .brand strong { display:block; letter-spacing:.2em; font-size: 24px; font-weight: 500; color: white; line-height:1; margin-bottom:6px; }
+    .status { display:flex; align-items:center; gap:9px; padding-top:2px; font-size:12px; color:var(--muted); text-align:right; }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 14px rgba(77,231,174,.85); flex:none; }
+
+    .hero { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; margin-top:-14px; }
+    .copy h1 { margin:0; font-size: clamp(36px, 9.3vw, 58px); font-weight: 300; letter-spacing:-.035em; }
+    .copy p { margin:9px 0 0; color:var(--muted); font-size: clamp(16px, 4.4vw, 21px); }
+
+    .voice-stage { position:relative; width:min(88vw, 430px); aspect-ratio:1; margin:20px auto 12px; display:grid; place-items:center; }
+    .voice-stage::before, .voice-stage::after { content:""; position:absolute; border-radius:50%; border:1px solid rgba(125,153,255,.13); inset:8%; animation: orbit 20s linear infinite; }
+    .voice-stage::after { inset:17%; animation-duration:14s; animation-direction:reverse; border-color:rgba(187,125,255,.12); }
+
+    .mic {
+      position:relative; z-index:5;
+      width:112px; height:112px; border-radius:50%;
+      border:1px solid rgba(210,224,255,.72);
+      background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.16), rgba(74,102,255,.15) 48%, rgba(13,22,42,.84) 76%);
+      box-shadow: 0 0 0 13px rgba(80,104,255,.035), 0 0 42px rgba(91,119,255,.35), inset 0 0 30px rgba(118,157,255,.17);
+      display:grid; place-items:center; cursor:pointer; touch-action:none; user-select:none;
+      transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }
+    .mic:active, .mic.listening { transform:scale(.96); border-color:#d8e6ff; box-shadow:0 0 0 17px rgba(80,104,255,.055), 0 0 64px rgba(91,119,255,.62), 0 0 90px rgba(180,97,255,.25), inset 0 0 34px rgba(118,157,255,.25); }
+    .mic svg { width:40px; height:40px; filter:drop-shadow(0 0 12px rgba(130,183,255,.7)); }
+
+    .hint { color:#cdd8ee; font-size:14px; margin-top:8px; }
+    .hint span { color:#7f91b4; }
+
+    .transcript-wrap { width:min(92vw, 560px); min-height:84px; margin-top:16px; padding:14px 16px; border:1px solid var(--line); border-radius:22px; background:linear-gradient(180deg, rgba(16,26,45,.72), rgba(10,17,31,.48)); backdrop-filter: blur(18px); box-shadow: inset 0 1px rgba(255,255,255,.04); }
+    .transcript-label { display:flex; justify-content:space-between; gap:12px; font-size:11px; text-transform:uppercase; letter-spacing:.16em; color:#7084aa; margin-bottom:8px; }
+    .transcript { font-size:16px; line-height:1.45; min-height:25px; color:#eef3ff; }
+    .interim { color:#8193b8; }
+
+    footer { display:flex; align-items:center; justify-content:space-between; gap:14px; color:#7183a5; font-size:11px; padding-top:10px; }
+    .pulse { display:flex; align-items:center; gap:3px; height:18px; }
+    .pulse i { width:2px; border-radius:3px; background:linear-gradient(var(--cyan), var(--violet)); animation: bars 1.2s ease-in-out infinite; opacity:.7; }
+    .pulse i:nth-child(1){height:7px}.pulse i:nth-child(2){height:14px;animation-delay:.12s}.pulse i:nth-child(3){height:10px;animation-delay:.24s}.pulse i:nth-child(4){height:17px;animation-delay:.36s}.pulse i:nth-child(5){height:8px;animation-delay:.48s}
+
+    @keyframes orbit { to { transform:rotate(360deg); } }
+    @keyframes bars { 0%,100%{transform:scaleY(.45);opacity:.45} 50%{transform:scaleY(1);opacity:1} }
+
+    @media (min-width: 760px) {
+      .app { padding-left:34px; padding-right:34px; }
+      .content { min-height: calc(100svh - 52px); }
+      .voice-stage { width:min(58vh, 520px); }
+      .mic { width:128px; height:128px; }
+      .transcript-wrap { margin-top:8px; }
+      footer { font-size:12px; }
+    }
   </style>
 </head>
 <body>
-  <main>
-    <section class="card">
-      <h1>TCHX Voice Bridge</h1>
-      <p>Incremento 1 · Speech-to-text desde la app web</p>
+  <main class="app">
+    <canvas id="field"></canvas>
+    <div class="noise"></div>
+    <section class="content">
+      <header>
+        <div class="brand"><strong>TCHX</strong>VOICE</div>
+        <div class="status"><span class="dot"></span><div><b style="color:#e6ecfa;font-weight:500">Conectado</b><br>CME-01</div></div>
+      </header>
 
-      <button id="listen">🎙 Empezar a escuchar</button>
-      <div id="status">Listo.</div>
+      <section class="hero">
+        <div class="copy">
+          <h1 id="headline">Te escucho…</h1>
+          <p id="subline">Mantén presionado para hablar</p>
+        </div>
 
-      <div class="label">Transcripción</div>
-      <div id="transcript"><span id="final"></span><span id="interim"></span></div>
+        <div class="voice-stage">
+          <button class="mic" id="mic" aria-label="Mantén presionado para hablar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path>
+            </svg>
+          </button>
+        </div>
+
+        <div class="hint" id="hint">Push to talk · <span>suelta para detener</span></div>
+
+        <div class="transcript-wrap">
+          <div class="transcript-label"><span>Transcripción</span><span id="state">Listo</span></div>
+          <div class="transcript"><span id="final"></span><span class="interim" id="interim"></span></div>
+        </div>
+      </section>
+
+      <footer>
+        <div style="display:flex;align-items:center;gap:9px"><span class="pulse"><i></i><i></i><i></i><i></i><i></i></span><span>STT activo</span></div>
+        <span>Privado · Tailscale</span>
+      </footer>
     </section>
   </main>
 
   <script>
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const button = document.querySelector('#listen');
-    const status = document.querySelector('#status');
+    const mic = document.querySelector('#mic');
+    const headline = document.querySelector('#headline');
+    const subline = document.querySelector('#subline');
+    const state = document.querySelector('#state');
     const finalText = document.querySelector('#final');
     const interimText = document.querySelector('#interim');
+    let recognition;
+    let listening = false;
+    let committed = '';
+
+    async function primeMicPermission() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach(t => t.stop());
+        state.textContent = 'Micrófono listo';
+      } catch (e) {
+        state.textContent = 'Permiso requerido';
+        subline.textContent = 'Permite el micrófono para comenzar';
+      }
+    }
 
     if (!SpeechRecognition) {
-      button.disabled = true;
-      status.textContent = 'Este navegador no expone Web Speech Recognition. Prueba Chrome o Edge.';
+      mic.disabled = true;
+      headline.textContent = 'STT no disponible';
+      subline.textContent = 'Usa Chrome o Edge';
+      state.textContent = 'No compatible';
     } else {
-      const recognition = new SpeechRecognition();
+      recognition = new SpeechRecognition();
       recognition.lang = 'es-MX';
       recognition.continuous = true;
       recognition.interimResults = true;
 
-      let listening = false;
-      let committed = '';
-
       recognition.onstart = () => {
         listening = true;
-        button.classList.add('listening');
-        button.textContent = '■ Detener';
-        status.textContent = 'Escuchando…';
+        mic.classList.add('listening');
+        headline.textContent = 'Te escucho…';
+        subline.textContent = 'Habla naturalmente';
+        state.textContent = 'Escuchando';
       };
 
       recognition.onresult = (event) => {
         let interim = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const text = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
-            committed += text.trim() + ' ';
-          } else {
-            interim += text;
-          }
+          if (event.results[i].isFinal) committed += text.trim() + ' ';
+          else interim += text;
         }
         finalText.textContent = committed;
         interimText.textContent = interim;
       };
 
       recognition.onerror = (event) => {
-        status.textContent = `STT error: ${event.error}`;
+        if (event.error !== 'aborted') state.textContent = `Error: ${event.error}`;
       };
 
       recognition.onend = () => {
         listening = false;
-        button.classList.remove('listening');
-        button.textContent = '🎙 Empezar a escuchar';
+        mic.classList.remove('listening');
         interimText.textContent = '';
-        if (!status.textContent.startsWith('STT error')) {
-          status.textContent = 'Detenido.';
-        }
+        headline.textContent = 'Listo para ti';
+        subline.textContent = 'Mantén presionado para hablar';
+        if (!state.textContent.startsWith('Error')) state.textContent = 'Listo';
       };
 
-      button.addEventListener('click', () => {
+      const start = (e) => {
+        e.preventDefault();
+        if (!listening) {
+          try { recognition.start(); } catch (_) {}
+        }
+      };
+      const stop = (e) => {
+        e.preventDefault();
         if (listening) recognition.stop();
-        else recognition.start();
-      });
+      };
+
+      ['pointerdown'].forEach(evt => mic.addEventListener(evt, start));
+      ['pointerup','pointercancel','pointerleave'].forEach(evt => mic.addEventListener(evt, stop));
+      mic.addEventListener('keydown', e => { if ((e.code === 'Space' || e.code === 'Enter') && !e.repeat) start(e); });
+      mic.addEventListener('keyup', e => { if (e.code === 'Space' || e.code === 'Enter') stop(e); });
+
+      window.addEventListener('load', primeMicPermission, { once:true });
     }
+
+    // Animated neural/voice field
+    const canvas = document.querySelector('#field');
+    const ctx = canvas.getContext('2d');
+    const DPR = Math.min(window.devicePixelRatio || 1, 2);
+    let W, H, particles = [];
+
+    function resize() {
+      W = canvas.width = Math.floor(innerWidth * DPR);
+      H = canvas.height = Math.floor(innerHeight * DPR);
+      canvas.style.width = innerWidth + 'px';
+      canvas.style.height = innerHeight + 'px';
+      const count = Math.min(170, Math.floor((innerWidth * innerHeight) / 5200));
+      particles = Array.from({ length: count }, (_, i) => ({
+        a: Math.random() * Math.PI * 2,
+        r: .22 + Math.random() * .25,
+        s: .00045 + Math.random() * .0007,
+        wobble: Math.random() * Math.PI * 2,
+        size: .65 + Math.random() * 1.5,
+        phase: Math.random() * Math.PI * 2
+      }));
+    }
+
+    function draw(t) {
+      ctx.clearRect(0,0,W,H);
+      const cx = W * .5;
+      const cy = H * (innerWidth < 760 ? .46 : .5);
+      const base = Math.min(W,H);
+      const amp = listening ? 1.14 : 1;
+
+      ctx.globalCompositeOperation = 'lighter';
+      particles.forEach((p, i) => {
+        p.a += p.s * (16.6);
+        const wave = 1 + Math.sin(t*.0016 + p.phase + i*.11) * .09 * amp;
+        const rx = base * p.r * (1.05 + .09*Math.sin(t*.0007+p.wobble));
+        const ry = rx * (.72 + .16*Math.cos(t*.0009+p.phase));
+        const x = cx + Math.cos(p.a) * rx * wave;
+        const y = cy + Math.sin(p.a*1.08) * ry * wave;
+        const hueMix = (Math.sin(p.phase + t*.00035)+1)/2;
+        const r = Math.round(99 + 88*hueMix), g = Math.round(153 - 30*hueMix), b = 255;
+        ctx.fillStyle = `rgba(${r},${g},${b},${listening?.78:.48})`;
+        ctx.beginPath();
+        ctx.arc(x,y,p.size*DPR*(listening?1.15:1),0,Math.PI*2);
+        ctx.fill();
+
+        if (i % 9 === 0) {
+          ctx.strokeStyle = `rgba(104,140,255,${listening?.16:.09})`;
+          ctx.lineWidth = .6*DPR;
+          ctx.beginPath();
+          ctx.moveTo(x,y);
+          const x2 = cx + Math.cos(p.a+.23) * rx*.9;
+          const y2 = cy + Math.sin((p.a+.23)*1.08) * ry*.9;
+          ctx.lineTo(x2,y2);
+          ctx.stroke();
+        }
+      });
+      ctx.globalCompositeOperation = 'source-over';
+      requestAnimationFrame(draw);
+    }
+
+    resize();
+    addEventListener('resize', resize);
+    requestAnimationFrame(draw);
   </script>
 </body>
 </html>
