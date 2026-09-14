@@ -71,6 +71,8 @@
       cursor: pointer;
       touch-action: none;
       user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
       transition: transform .15s ease, background .15s ease, border-color .15s ease;
     }
 
@@ -115,36 +117,6 @@
 
     .notify-button.visible { display: inline-flex; align-items: center; gap: 8px; }
 
-    .transcript-card {
-      width: 100%;
-      max-width: 520px;
-      border: 1px solid var(--line);
-      background: var(--panel);
-      border-radius: 16px;
-      padding: 14px 15px;
-      text-align: left;
-    }
-
-    .transcript-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 8px;
-      color: var(--muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: .08em;
-    }
-
-    .transcript {
-      min-height: 24px;
-      color: var(--text);
-      font-size: 16px;
-      line-height: 1.45;
-      white-space: pre-wrap;
-    }
-
-    .interim { color: var(--muted); }
 
     footer {
       display: flex;
@@ -184,13 +156,10 @@
       </button>
 
       <div class="hint">Hold to speak · release to stop</div>
+      <div class="hint" id="state">Ready</div>
       <button class="alert-button" id="alerts" type="button">Enable alerts</button>
       <button class="notify-button" id="notify" type="button">▶ Play notification</button>
 
-      <div class="transcript-card">
-        <div class="transcript-head"><span>Transcript</span><span id="state">Ready</span></div>
-        <div class="transcript"><span id="final"></span><span class="interim" id="interim"></span></div>
-      </div>
     </section>
 
     <footer>
@@ -205,14 +174,11 @@
     const headline = document.querySelector('#headline');
     const subline = document.querySelector('#subline');
     const state = document.querySelector('#state');
-    const finalText = document.querySelector('#final');
-    const interimText = document.querySelector('#interim');
     const alertsButton = document.querySelector('#alerts');
     const notifyButton = document.querySelector('#notify');
 
     let recognition;
     let listening = false;
-    let committed = '';
     let pendingMessageId = null;
     let incomingMessageId = null;
     let microphoneGranted = false;
@@ -259,19 +225,11 @@
       };
 
       recognition.onresult = event => {
-        let interim = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
-          const text = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
-            const finalChunk = text.trim();
-            if (finalChunk) {
-              committed += finalChunk + ' ';
-              currentUtterance += finalChunk + ' ';
-            }
-          } else interim += text;
+          if (!event.results[i].isFinal) continue;
+          const finalChunk = event.results[i][0].transcript.trim();
+          if (finalChunk) currentUtterance += finalChunk + ' ';
         }
-        finalText.textContent = committed;
-        interimText.textContent = interim;
       };
 
       recognition.onerror = event => {
@@ -281,7 +239,6 @@
       recognition.onend = () => {
         listening = false;
         mic.classList.remove('listening');
-        interimText.textContent = '';
         headline.textContent = 'Push to talk';
         subline.textContent = 'Press and hold the button while you speak. Release to stop.';
         const utterance = currentUtterance.trim();
@@ -336,7 +293,14 @@
     const audioContext = AudioContextClass ? new AudioContextClass() : null;
     const pendingAudio = [];
     let voiceSocket;
+    let voiceReconnectTimer = null;
     let audioUnlocked = false;
+
+    if (audioContext) {
+      audioContext.onstatechange = () => {
+        audioUnlocked = audioContext.state === 'running';
+      };
+    }
 
     function urlBase64ToUint8Array(base64String) {
       const padding = '='.repeat((4 - base64String.length % 4) % 4);
@@ -422,7 +386,7 @@
     }
 
     async function unlockAudio() {
-      if (!audioContext) return;
+      if (!audioContext) return false;
       try {
         if (audioContext.state !== 'running') await audioContext.resume();
         audioUnlocked = audioContext.state === 'running';
@@ -433,13 +397,22 @@
             await playAudioBuffer(item.arrayBuffer, item.messageId);
           }
         }
+        return audioUnlocked;
       } catch {
-        state.textContent = 'Audio permission needed';
+        audioUnlocked = false;
+        state.textContent = 'Tap to enable audio';
+        return false;
       }
     }
 
     async function playAudioBuffer(arrayBuffer, messageId = null) {
-      if (!audioContext || !audioUnlocked) {
+      if (!audioContext) return;
+      if (audioContext.state !== 'running') {
+        audioUnlocked = false;
+        try { await audioContext.resume(); } catch {}
+        audioUnlocked = audioContext.state === 'running';
+      }
+      if (!audioUnlocked) {
         pendingAudio.push({ arrayBuffer, messageId });
         state.textContent = messageId ? 'Tap to hear alert' : 'Tap to enable audio';
         return;
@@ -511,21 +484,31 @@
     document.addEventListener('pointerdown', unlockAudio, { passive: true });
     document.addEventListener('keydown', unlockAudio);
 
-    function connectVoiceChannel() {
-      voiceSocket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
-      voiceSocket.binaryType = 'arraybuffer';
+    function scheduleVoiceReconnect() {
+      if (voiceReconnectTimer) clearTimeout(voiceReconnectTimer);
+      voiceReconnectTimer = setTimeout(() => {
+        voiceReconnectTimer = null;
+        connectVoiceChannel();
+      }, 1500);
+    }
 
-      voiceSocket.onopen = () => {
-        voiceSocket.send('ready');
+    function connectVoiceChannel() {
+      if (voiceSocket && (voiceSocket.readyState === WebSocket.OPEN || voiceSocket.readyState === WebSocket.CONNECTING)) return;
+
+      const socket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
+      socket.binaryType = 'arraybuffer';
+      voiceSocket = socket;
+
+      socket.onopen = () => {
+        if (voiceSocket !== socket) return;
+        socket.send('ready');
       };
 
-      voiceSocket.onmessage = event => {
+      socket.onmessage = event => {
         if (typeof event.data === 'string') {
           try {
             const message = JSON.parse(event.data);
-            if (message.type === 'voice-message' && message.message_id) {
-              incomingMessageId = message.message_id;
-            }
+            if (message.type === 'voice-message' && message.message_id) incomingMessageId = message.message_id;
           } catch {}
           return;
         }
@@ -536,15 +519,33 @@
           playAudioBuffer(event.data, messageId);
           return;
         }
-        if (event.data instanceof Blob) {
-          event.data.arrayBuffer().then(buffer => playAudioBuffer(buffer, messageId));
-        }
+        if (event.data instanceof Blob) event.data.arrayBuffer().then(buffer => playAudioBuffer(buffer, messageId));
       };
 
-      voiceSocket.onclose = () => {
-        setTimeout(connectVoiceChannel, 1500);
+      socket.onerror = () => {
+        try { socket.close(); } catch {}
+      };
+
+      socket.onclose = () => {
+        if (voiceSocket === socket) voiceSocket = null;
+        scheduleVoiceReconnect();
       };
     }
+
+    function recoverForegroundState() {
+      if (document.visibilityState !== 'visible') return;
+      if (audioContext) audioUnlocked = audioContext.state === 'running';
+      if (!voiceSocket || voiceSocket.readyState > WebSocket.OPEN) connectVoiceChannel();
+    }
+
+    document.addEventListener('visibilitychange', recoverForegroundState);
+    window.addEventListener('pageshow', recoverForegroundState);
+
+    setInterval(() => {
+      if (voiceSocket?.readyState === WebSocket.OPEN) {
+        try { voiceSocket.send('ping'); } catch {}
+      }
+    }, 20000);
 
     connectVoiceChannel();
     refreshAlertState();
