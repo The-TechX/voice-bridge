@@ -71,8 +71,6 @@
       cursor: pointer;
       touch-action: none;
       user-select: none;
-      -webkit-user-select: none;
-      -webkit-touch-callout: none;
       transition: transform .15s ease, background .15s ease, border-color .15s ease;
     }
 
@@ -293,14 +291,7 @@
     const audioContext = AudioContextClass ? new AudioContextClass() : null;
     const pendingAudio = [];
     let voiceSocket;
-    let voiceReconnectTimer = null;
     let audioUnlocked = false;
-
-    if (audioContext) {
-      audioContext.onstatechange = () => {
-        audioUnlocked = audioContext.state === 'running';
-      };
-    }
 
     function urlBase64ToUint8Array(base64String) {
       const padding = '='.repeat((4 - base64String.length % 4) % 4);
@@ -386,7 +377,7 @@
     }
 
     async function unlockAudio() {
-      if (!audioContext) return false;
+      if (!audioContext) return;
       try {
         if (audioContext.state !== 'running') await audioContext.resume();
         audioUnlocked = audioContext.state === 'running';
@@ -397,22 +388,13 @@
             await playAudioBuffer(item.arrayBuffer, item.messageId);
           }
         }
-        return audioUnlocked;
       } catch {
-        audioUnlocked = false;
-        state.textContent = 'Tap to enable audio';
-        return false;
+        state.textContent = 'Audio permission needed';
       }
     }
 
     async function playAudioBuffer(arrayBuffer, messageId = null) {
-      if (!audioContext) return;
-      if (audioContext.state !== 'running') {
-        audioUnlocked = false;
-        try { await audioContext.resume(); } catch {}
-        audioUnlocked = audioContext.state === 'running';
-      }
-      if (!audioUnlocked) {
+      if (!audioContext || !audioUnlocked) {
         pendingAudio.push({ arrayBuffer, messageId });
         state.textContent = messageId ? 'Tap to hear alert' : 'Tap to enable audio';
         return;
@@ -484,31 +466,21 @@
     document.addEventListener('pointerdown', unlockAudio, { passive: true });
     document.addEventListener('keydown', unlockAudio);
 
-    function scheduleVoiceReconnect() {
-      if (voiceReconnectTimer) clearTimeout(voiceReconnectTimer);
-      voiceReconnectTimer = setTimeout(() => {
-        voiceReconnectTimer = null;
-        connectVoiceChannel();
-      }, 1500);
-    }
-
     function connectVoiceChannel() {
-      if (voiceSocket && (voiceSocket.readyState === WebSocket.OPEN || voiceSocket.readyState === WebSocket.CONNECTING)) return;
+      voiceSocket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
+      voiceSocket.binaryType = 'arraybuffer';
 
-      const socket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
-      socket.binaryType = 'arraybuffer';
-      voiceSocket = socket;
-
-      socket.onopen = () => {
-        if (voiceSocket !== socket) return;
-        socket.send('ready');
+      voiceSocket.onopen = () => {
+        voiceSocket.send('ready');
       };
 
-      socket.onmessage = event => {
+      voiceSocket.onmessage = event => {
         if (typeof event.data === 'string') {
           try {
             const message = JSON.parse(event.data);
-            if (message.type === 'voice-message' && message.message_id) incomingMessageId = message.message_id;
+            if (message.type === 'voice-message' && message.message_id) {
+              incomingMessageId = message.message_id;
+            }
           } catch {}
           return;
         }
@@ -519,33 +491,15 @@
           playAudioBuffer(event.data, messageId);
           return;
         }
-        if (event.data instanceof Blob) event.data.arrayBuffer().then(buffer => playAudioBuffer(buffer, messageId));
+        if (event.data instanceof Blob) {
+          event.data.arrayBuffer().then(buffer => playAudioBuffer(buffer, messageId));
+        }
       };
 
-      socket.onerror = () => {
-        try { socket.close(); } catch {}
-      };
-
-      socket.onclose = () => {
-        if (voiceSocket === socket) voiceSocket = null;
-        scheduleVoiceReconnect();
+      voiceSocket.onclose = () => {
+        setTimeout(connectVoiceChannel, 1500);
       };
     }
-
-    function recoverForegroundState() {
-      if (document.visibilityState !== 'visible') return;
-      if (audioContext) audioUnlocked = audioContext.state === 'running';
-      if (!voiceSocket || voiceSocket.readyState > WebSocket.OPEN) connectVoiceChannel();
-    }
-
-    document.addEventListener('visibilitychange', recoverForegroundState);
-    window.addEventListener('pageshow', recoverForegroundState);
-
-    setInterval(() => {
-      if (voiceSocket?.readyState === WebSocket.OPEN) {
-        try { voiceSocket.send('ping'); } catch {}
-      }
-    }, 20000);
 
     connectVoiceChannel();
     refreshAlertState();
