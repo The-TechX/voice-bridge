@@ -287,11 +287,7 @@
     }
 
     const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    const audioContext = AudioContextClass ? new AudioContextClass() : null;
-    const pendingAudio = [];
     let voiceSocket;
-    let audioUnlocked = false;
 
     function urlBase64ToUint8Array(base64String) {
       const padding = '='.repeat((4 - base64String.length % 4) % 4);
@@ -376,40 +372,25 @@
       } catch {}
     }
 
-    async function unlockAudio() {
-      if (!audioContext) return;
-      try {
-        if (audioContext.state !== 'running') await audioContext.resume();
-        audioUnlocked = audioContext.state === 'running';
-        if (audioUnlocked) {
-          state.textContent = listening ? 'Listening' : 'Ready';
-          while (pendingAudio.length) {
-            const item = pendingAudio.shift();
-            await playAudioBuffer(item.arrayBuffer, item.messageId);
-          }
-        }
-      } catch {
-        state.textContent = 'Audio permission needed';
-      }
-    }
-
     async function playAudioBuffer(arrayBuffer, messageId = null) {
-      if (!audioContext || !audioUnlocked) {
-        pendingAudio.push({ arrayBuffer, messageId });
-        state.textContent = messageId ? 'Tap to hear alert' : 'Tap to enable audio';
-        return;
-      }
+      const blob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
 
+      const cleanup = () => URL.revokeObjectURL(url);
+      audio.onended = () => {
+        cleanup();
+        acknowledgeMessage(messageId);
+      };
+      audio.onerror = cleanup;
+
+      state.textContent = messageId ? 'Playing alert' : 'Speaking';
       try {
-        const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-        const source = audioContext.createBufferSource();
-        source.buffer = decoded;
-        source.connect(audioContext.destination);
-        source.onended = () => acknowledgeMessage(messageId);
-        source.start();
-        state.textContent = messageId ? 'Playing alert' : 'Speaking';
-      } catch {
-        state.textContent = 'Audio playback failed';
+        await audio.play();
+      } catch (error) {
+        console.error(error);
+        cleanup();
+        state.textContent = 'Tap once to enable audio';
       }
     }
 
@@ -418,7 +399,6 @@
       try {
         const response = await fetch(`/messages/${encodeURIComponent(messageId)}/audio`, { cache: 'no-store' });
         if (!response.ok) throw new Error('Message audio unavailable');
-        await unlockAudio();
         await playAudioBuffer(await response.arrayBuffer(), messageId);
       } catch (error) {
         console.error(error);
@@ -458,13 +438,10 @@
     notifyButton.addEventListener('click', async () => {
       if (!pendingMessageId) return;
       const messageId = pendingMessageId;
-      await unlockAudio();
       await playMessage(messageId);
       clearPendingNotification();
     });
 
-    document.addEventListener('pointerdown', unlockAudio, { passive: true });
-    document.addEventListener('keydown', unlockAudio);
 
     function connectVoiceChannel() {
       voiceSocket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
