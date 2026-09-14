@@ -214,6 +214,7 @@
     let listening = false;
     let committed = '';
     let pendingMessageId = null;
+    let incomingMessageId = null;
     let microphoneGranted = false;
 
     async function ensureMicrophonePermission() {
@@ -487,12 +488,24 @@
       };
 
       voiceSocket.onmessage = event => {
+        if (typeof event.data === 'string') {
+          try {
+            const message = JSON.parse(event.data);
+            if (message.type === 'voice-message' && message.message_id) {
+              incomingMessageId = message.message_id;
+            }
+          } catch {}
+          return;
+        }
+
+        const messageId = incomingMessageId;
+        incomingMessageId = null;
         if (event.data instanceof ArrayBuffer) {
-          playAudioBuffer(event.data);
+          playAudioBuffer(event.data, messageId);
           return;
         }
         if (event.data instanceof Blob) {
-          event.data.arrayBuffer().then(buffer => playAudioBuffer(buffer));
+          event.data.arrayBuffer().then(buffer => playAudioBuffer(buffer, messageId));
         }
       };
 

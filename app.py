@@ -197,6 +197,14 @@ async def create_message(request: MessageRequest):
         "body": "Nuevo mensaje de voz. Toca para escuchar.",
         "url": f"/?message={message_id}",
     }
+    live_delivered = 0
+    if clients:
+        try:
+            audio = await synthesize_audio(request.text)
+            live_delivered = await broadcast_message_audio(message_id, audio)
+        except HTTPException:
+            live_delivered = 0
+
     subscriptions = load_subscriptions()
     results = await asyncio.gather(
         *(asyncio.to_thread(send_web_push, subscription, payload) for subscription in subscriptions)
@@ -204,6 +212,7 @@ async def create_message(request: MessageRequest):
     return {
         "status": "ok",
         "message_id": message_id,
+        "live_delivered": live_delivered,
         "push_subscriptions": len(subscriptions),
         "push_delivered": sum(1 for result in results if result),
     }
@@ -300,6 +309,22 @@ async def broadcast_audio(audio: bytes) -> int:
     dead: list[WebSocket] = []
     for websocket in list(clients):
         try:
+            await websocket.send_bytes(audio)
+            delivered += 1
+        except Exception:
+            dead.append(websocket)
+    for websocket in dead:
+        clients.discard(websocket)
+    return delivered
+
+
+async def broadcast_message_audio(message_id: str, audio: bytes) -> int:
+    delivered = 0
+    dead: list[WebSocket] = []
+    metadata = json.dumps({"type": "voice-message", "message_id": message_id})
+    for websocket in list(clients):
+        try:
+            await websocket.send_text(metadata)
             await websocket.send_bytes(audio)
             delivered += 1
         except Exception:
