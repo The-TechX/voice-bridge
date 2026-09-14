@@ -1,0 +1,7 @@
+services:
+  voice-bridge:
+    build: .
+    container_name: voice-bridge
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8765}:8000"
