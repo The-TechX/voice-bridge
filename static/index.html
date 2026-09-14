@@ -115,36 +115,6 @@
 
     .notify-button.visible { display: inline-flex; align-items: center; gap: 8px; }
 
-    .transcript-card {
-      width: 100%;
-      max-width: 520px;
-      border: 1px solid var(--line);
-      background: var(--panel);
-      border-radius: 16px;
-      padding: 14px 15px;
-      text-align: left;
-    }
-
-    .transcript-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 8px;
-      color: var(--muted);
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: .08em;
-    }
-
-    .transcript {
-      min-height: 24px;
-      color: var(--text);
-      font-size: 16px;
-      line-height: 1.45;
-      white-space: pre-wrap;
-    }
-
-    .interim { color: var(--muted); }
 
     footer {
       display: flex;
@@ -184,38 +154,43 @@
       </button>
 
       <div class="hint">Hold to speak · release to stop</div>
+      <div class="hint" id="state">Ready</div>
       <button class="alert-button" id="alerts" type="button">Enable alerts</button>
       <button class="notify-button" id="notify" type="button">▶ Play notification</button>
 
-      <div class="transcript-card">
-        <div class="transcript-head"><span>Transcript</span><span id="state">Ready</span></div>
-        <div class="transcript"><span id="final"></span><span class="interim" id="interim"></span></div>
-      </div>
     </section>
 
     <footer>
-      <span>STT ready</span>
+      <span>Local STT ready</span>
       <span>Private via Tailscale</span>
     </footer>
   </main>
 
   <script>
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const mic = document.querySelector('#mic');
     const headline = document.querySelector('#headline');
     const subline = document.querySelector('#subline');
     const state = document.querySelector('#state');
-    const finalText = document.querySelector('#final');
-    const interimText = document.querySelector('#interim');
     const alertsButton = document.querySelector('#alerts');
     const notifyButton = document.querySelector('#notify');
 
-    let recognition;
     let listening = false;
-    let committed = '';
+    let recordingRequested = false;
+    let mediaRecorder = null;
+    let mediaStream = null;
+    let audioChunks = [];
     let pendingMessageId = null;
     let incomingMessageId = null;
     let microphoneGranted = false;
+    const voiceAudio = new Audio();
+    let voiceAudioUrl = null;
+    let voiceAudioReady = false;
+    const agentSessionKey = 'tchxVoiceAgentSessionId';
+    let agentSessionId = localStorage.getItem(agentSessionKey);
+    if (!agentSessionId) {
+      agentSessionId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+      localStorage.setItem(agentSessionKey, agentSessionId);
+    }
 
     async function ensureMicrophonePermission() {
       if (microphoneGranted) return true;
@@ -231,80 +206,144 @@
       }
     }
 
-    if (!SpeechRecognition) {
-      mic.disabled = true;
-      headline.textContent = 'Speech recognition unavailable';
-      subline.textContent = 'Use Chrome or Edge for this experiment.';
-      state.textContent = 'Unsupported';
-    } else {
-      recognition = new SpeechRecognition();
-      recognition.lang = 'en-US';
-      recognition.continuous = true;
-      recognition.interimResults = true;
+    async function enableVoiceAudio() {
+      if (voiceAudioReady) return;
+      try {
+        voiceAudio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+        await voiceAudio.play();
+        voiceAudio.pause();
+        voiceAudio.currentTime = 0;
+        voiceAudioReady = true;
+      } catch {}
+    }
 
-      recognition.onstart = () => {
+    function resetMicUi() {
+      listening = false;
+      mic.classList.remove('listening');
+      headline.textContent = 'Push to talk';
+      subline.textContent = 'Press and hold the button while you speak. Release to stop.';
+    }
+
+    function stopMediaStream() {
+      if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
+      mediaStream = null;
+    }
+
+    async function transcribeAudio(blob) {
+      state.textContent = 'Transcribing';
+      const form = new FormData();
+      const type = blob.type || 'application/octet-stream';
+      const extension = type.includes('mp4') ? 'm4a' : type.includes('webm') ? 'webm' : type.includes('ogg') ? 'ogg' : 'audio';
+      form.append('file', blob, `speech.${extension}`);
+
+      try {
+        const response = await fetch('/stt/transcribe', { method: 'POST', body: form });
+        if (!response.ok) throw new Error(`STT returned ${response.status}`);
+        const payload = await response.json();
+        const text = (payload.text || '').trim();
+        if (text) await sendToAgent(text);
+        else state.textContent = 'Ready';
+      } catch (error) {
+        console.error(error);
+        state.textContent = 'STT unavailable';
+      }
+    }
+
+    async function startRecording(event) {
+      event.preventDefault();
+      if (listening || recordingRequested) return;
+      recordingRequested = true;
+      enableVoiceAudio();
+
+      const allowed = await ensureMicrophonePermission();
+      if (!allowed || !recordingRequested) {
+        recordingRequested = false;
+        return;
+      }
+
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (!recordingRequested) {
+          stopMediaStream();
+          return;
+        }
+        audioChunks = [];
+        mediaRecorder = new MediaRecorder(mediaStream);
+        mediaRecorder.ondataavailable = event => {
+          if (event.data && event.data.size) audioChunks.push(event.data);
+        };
+        mediaRecorder.onerror = event => {
+          console.error(event.error || event);
+          state.textContent = 'Recording failed';
+          resetMicUi();
+          stopMediaStream();
+        };
+        mediaRecorder.onstop = async () => {
+          const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || audioChunks[0]?.type || 'application/octet-stream' });
+          mediaRecorder = null;
+          audioChunks = [];
+          stopMediaStream();
+          resetMicUi();
+          if (blob.size) await transcribeAudio(blob);
+          else state.textContent = 'Ready';
+        };
+        mediaRecorder.start();
         listening = true;
         mic.classList.add('listening');
         headline.textContent = 'Listening';
         subline.textContent = 'Keep holding while you speak.';
         state.textContent = 'Listening';
-      };
+      } catch (error) {
+        console.error(error);
+        recordingRequested = false;
+        stopMediaStream();
+        resetMicUi();
+        state.textContent = 'Microphone unavailable';
+      }
+    }
 
-      recognition.onresult = event => {
-        let interim = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const text = event.results[i][0].transcript;
-          if (event.results[i].isFinal) committed += text.trim() + ' ';
-          else interim += text;
-        }
-        finalText.textContent = committed;
-        interimText.textContent = interim;
-      };
+    function stopRecording(event) {
+      event.preventDefault();
+      recordingRequested = false;
+      if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+      else if (!listening) resetMicUi();
+    }
 
-      recognition.onerror = event => {
-        if (event.error !== 'aborted') state.textContent = `Error: ${event.error}`;
-      };
-
-      recognition.onend = () => {
-        listening = false;
-        mic.classList.remove('listening');
-        interimText.textContent = '';
-        headline.textContent = 'Push to talk';
-        subline.textContent = 'Press and hold the button while you speak. Release to stop.';
-        if (!state.textContent.startsWith('Error')) state.textContent = 'Ready';
-      };
-
-      const start = async event => {
-        event.preventDefault();
-        if (!listening) {
-          const allowed = await ensureMicrophonePermission();
-          if (!allowed) return;
-          try { recognition.start(); } catch {}
-        }
-      };
-
-      const stop = event => {
-        event.preventDefault();
-        if (listening) recognition.stop();
-      };
-
-      mic.addEventListener('pointerdown', start);
-      ['pointerup', 'pointercancel', 'pointerleave'].forEach(type => mic.addEventListener(type, stop));
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+      mic.disabled = true;
+      headline.textContent = 'Audio recording unavailable';
+      subline.textContent = 'This browser does not support microphone recording.';
+      state.textContent = 'Unsupported';
+    } else {
+      mic.addEventListener('pointerdown', startRecording);
+      ['pointerup', 'pointercancel', 'pointerleave'].forEach(type => mic.addEventListener(type, stopRecording));
       mic.addEventListener('keydown', event => {
-        if ((event.code === 'Space' || event.code === 'Enter') && !event.repeat) start(event);
+        if ((event.code === 'Space' || event.code === 'Enter') && !event.repeat) startRecording(event);
       });
       mic.addEventListener('keyup', event => {
-        if (event.code === 'Space' || event.code === 'Enter') stop(event);
+        if (event.code === 'Space' || event.code === 'Enter') stopRecording(event);
       });
+      window.addEventListener('load', ensureMicrophonePermission, { once: true });
+    }
 
+    async function sendToAgent(text) {
+      state.textContent = 'Thinking';
+      try {
+        const response = await fetch('/agent/turn', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: agentSessionId, text }),
+        });
+        if (!response.ok) throw new Error(`Agent returned ${response.status}`);
+        state.textContent = 'Waiting for voice';
+      } catch (error) {
+        console.error(error);
+        state.textContent = 'Agent unavailable';
+      }
     }
 
     const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    const audioContext = AudioContextClass ? new AudioContextClass() : null;
-    const pendingAudio = [];
     let voiceSocket;
-    let audioUnlocked = false;
 
     function urlBase64ToUint8Array(base64String) {
       const padding = '='.repeat((4 - base64String.length % 4) % 4);
@@ -389,40 +428,27 @@
       } catch {}
     }
 
-    async function unlockAudio() {
-      if (!audioContext) return;
-      try {
-        if (audioContext.state !== 'running') await audioContext.resume();
-        audioUnlocked = audioContext.state === 'running';
-        if (audioUnlocked) {
-          state.textContent = listening ? 'Listening' : 'Ready';
-          while (pendingAudio.length) {
-            const item = pendingAudio.shift();
-            await playAudioBuffer(item.arrayBuffer, item.messageId);
-          }
-        }
-      } catch {
-        state.textContent = 'Audio permission needed';
-      }
-    }
-
     async function playAudioBuffer(arrayBuffer, messageId = null) {
-      if (!audioContext || !audioUnlocked) {
-        pendingAudio.push({ arrayBuffer, messageId });
-        state.textContent = messageId ? 'Tap to hear alert' : 'Tap to enable audio';
-        return;
-      }
+      if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
+      voiceAudioUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'audio/mpeg' }));
+      voiceAudio.src = voiceAudioUrl;
+      voiceAudio.onended = () => {
+        if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
+        voiceAudioUrl = null;
+        acknowledgeMessage(messageId);
+        state.textContent = 'Ready';
+      };
+      voiceAudio.onerror = () => {
+        if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
+        voiceAudioUrl = null;
+      };
 
+      state.textContent = messageId ? 'Playing alert' : 'Speaking';
       try {
-        const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-        const source = audioContext.createBufferSource();
-        source.buffer = decoded;
-        source.connect(audioContext.destination);
-        source.onended = () => acknowledgeMessage(messageId);
-        source.start();
-        state.textContent = messageId ? 'Playing alert' : 'Speaking';
-      } catch {
-        state.textContent = 'Audio playback failed';
+        await voiceAudio.play();
+      } catch (error) {
+        console.error(error);
+        state.textContent = 'Tap once to enable audio';
       }
     }
 
@@ -431,7 +457,6 @@
       try {
         const response = await fetch(`/messages/${encodeURIComponent(messageId)}/audio`, { cache: 'no-store' });
         if (!response.ok) throw new Error('Message audio unavailable');
-        await unlockAudio();
         await playAudioBuffer(await response.arrayBuffer(), messageId);
       } catch (error) {
         console.error(error);
@@ -471,13 +496,10 @@
     notifyButton.addEventListener('click', async () => {
       if (!pendingMessageId) return;
       const messageId = pendingMessageId;
-      await unlockAudio();
       await playMessage(messageId);
       clearPendingNotification();
     });
 
-    document.addEventListener('pointerdown', unlockAudio, { passive: true });
-    document.addEventListener('keydown', unlockAudio);
 
     function connectVoiceChannel() {
       voiceSocket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
