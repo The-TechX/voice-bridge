@@ -101,6 +101,20 @@
       border-color: #2e6952;
     }
 
+    .notify-button {
+      display: none;
+      border: 1px solid #4b4f56;
+      border-radius: 999px;
+      padding: 12px 18px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .notify-button.visible { display: inline-flex; align-items: center; gap: 8px; }
+
     .transcript-card {
       width: 100%;
       max-width: 520px;
@@ -171,6 +185,7 @@
 
       <div class="hint">Hold to speak · release to stop</div>
       <button class="alert-button" id="alerts" type="button">Enable alerts</button>
+      <button class="notify-button" id="notify" type="button">▶ Play notification</button>
 
       <div class="transcript-card">
         <div class="transcript-head"><span>Transcript</span><span id="state">Ready</span></div>
@@ -193,19 +208,25 @@
     const finalText = document.querySelector('#final');
     const interimText = document.querySelector('#interim');
     const alertsButton = document.querySelector('#alerts');
+    const notifyButton = document.querySelector('#notify');
 
     let recognition;
     let listening = false;
     let committed = '';
+    let pendingMessageId = null;
+    let microphoneGranted = false;
 
-    async function requestMicrophonePermission() {
+    async function ensureMicrophonePermission() {
+      if (microphoneGranted) return true;
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         stream.getTracks().forEach(track => track.stop());
-        state.textContent = 'Ready';
+        microphoneGranted = true;
+        return true;
       } catch {
-        state.textContent = 'Permission needed';
-        subline.textContent = 'Allow microphone access, then press and hold to speak.';
+        state.textContent = 'Microphone permission needed';
+        subline.textContent = 'Allow microphone access to use push to talk.';
+        return false;
       }
     }
 
@@ -252,9 +273,11 @@
         if (!state.textContent.startsWith('Error')) state.textContent = 'Ready';
       };
 
-      const start = event => {
+      const start = async event => {
         event.preventDefault();
         if (!listening) {
+          const allowed = await ensureMicrophonePermission();
+          if (!allowed) return;
           try { recognition.start(); } catch {}
         }
       };
@@ -273,7 +296,6 @@
         if (event.code === 'Space' || event.code === 'Enter') stop(event);
       });
 
-      window.addEventListener('load', requestMicrophonePermission, { once: true });
     }
 
     const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -416,11 +438,23 @@
       }
     }
 
-    async function playPendingMessage() {
+    function showPendingNotification(messageId) {
+      if (!messageId) return;
+      pendingMessageId = messageId;
+      notifyButton.classList.add('visible');
+      state.textContent = 'Notification waiting';
+    }
+
+    function clearPendingNotification() {
+      pendingMessageId = null;
+      notifyButton.classList.remove('visible');
+    }
+
+    async function discoverPendingMessage() {
       const params = new URLSearchParams(location.search);
       const requestedId = params.get('message');
       if (requestedId) {
-        await playMessage(requestedId);
+        showPendingNotification(requestedId);
         history.replaceState({}, '', '/');
         return;
       }
@@ -429,9 +463,17 @@
         const response = await fetch('/messages/pending', { cache: 'no-store' });
         if (!response.ok) return;
         const { message } = await response.json();
-        if (message?.id) await playMessage(message.id);
+        if (message?.id) showPendingNotification(message.id);
       } catch {}
     }
+
+    notifyButton.addEventListener('click', async () => {
+      if (!pendingMessageId) return;
+      const messageId = pendingMessageId;
+      await unlockAudio();
+      await playMessage(messageId);
+      clearPendingNotification();
+    });
 
     document.addEventListener('pointerdown', unlockAudio, { passive: true });
     document.addEventListener('keydown', unlockAudio);
@@ -461,7 +503,7 @@
 
     connectVoiceChannel();
     refreshAlertState();
-    playPendingMessage();
+    discoverPendingMessage();
   </script>
 </body>
 </html>
