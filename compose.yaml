@@ -5,3 +5,6 @@ services:
     restart: unless-stopped
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${VOICE_BRIDGE_PORT:-8765}:8000"
+    environment:
+      FISH_API_KEY: ${FISH_API_KEY:-}
+      FISH_REFERENCE_ID: ${FISH_REFERENCE_ID:-}

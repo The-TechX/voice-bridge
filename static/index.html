@@ -252,6 +252,40 @@
 
       window.addEventListener('load', requestMicrophonePermission, { once: true });
     }
+
+    const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    let voiceSocket;
+
+    function connectVoiceChannel() {
+      voiceSocket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
+      voiceSocket.binaryType = 'arraybuffer';
+
+      voiceSocket.onopen = () => {
+        voiceSocket.send('ready');
+      };
+
+      voiceSocket.onmessage = async event => {
+        if (!(event.data instanceof ArrayBuffer)) return;
+
+        const blob = new Blob([event.data], { type: 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => URL.revokeObjectURL(url);
+        audio.onerror = () => URL.revokeObjectURL(url);
+
+        try {
+          await audio.play();
+        } catch {
+          state.textContent = 'Tap once to enable audio';
+        }
+      };
+
+      voiceSocket.onclose = () => {
+        setTimeout(connectVoiceChannel, 1500);
+      };
+    }
+
+    connectVoiceChannel();
   </script>
 </body>
 </html>
