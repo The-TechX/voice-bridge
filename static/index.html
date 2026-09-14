@@ -252,6 +252,76 @@
 
       window.addEventListener('load', requestMicrophonePermission, { once: true });
     }
+
+    const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    const audioContext = AudioContextClass ? new AudioContextClass() : null;
+    const pendingAudio = [];
+    let voiceSocket;
+    let audioUnlocked = false;
+
+    async function unlockAudio() {
+      if (!audioContext) return;
+      try {
+        if (audioContext.state !== 'running') await audioContext.resume();
+        audioUnlocked = audioContext.state === 'running';
+        if (audioUnlocked) {
+          state.textContent = listening ? 'Listening' : 'Ready';
+          while (pendingAudio.length) {
+            await playAudioBuffer(pendingAudio.shift());
+          }
+        }
+      } catch {
+        state.textContent = 'Audio permission needed';
+      }
+    }
+
+    async function playAudioBuffer(arrayBuffer) {
+      if (!audioContext || !audioUnlocked) {
+        pendingAudio.push(arrayBuffer);
+        state.textContent = 'Tap to enable audio';
+        return;
+      }
+
+      try {
+        const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+        const source = audioContext.createBufferSource();
+        source.buffer = decoded;
+        source.connect(audioContext.destination);
+        source.start();
+      } catch {
+        state.textContent = 'Audio playback failed';
+      }
+    }
+
+    document.addEventListener('pointerdown', unlockAudio, { passive: true });
+    document.addEventListener('keydown', unlockAudio);
+
+    function connectVoiceChannel() {
+      voiceSocket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
+      voiceSocket.binaryType = 'arraybuffer';
+
+      voiceSocket.onopen = () => {
+        voiceSocket.send('ready');
+      };
+
+      voiceSocket.onmessage = event => {
+        if (event.data instanceof ArrayBuffer) {
+          playAudioBuffer(event.data);
+          return;
+        }
+
+        if (event.data instanceof Blob) {
+          event.data.arrayBuffer().then(playAudioBuffer);
+        }
+      };
+
+      voiceSocket.onclose = () => {
+        setTimeout(connectVoiceChannel, 1500);
+      };
+    }
+
+    connectVoiceChannel();
   </script>
 </body>
 </html>
