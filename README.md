@@ -158,3 +158,23 @@ curl -X POST http://127.0.0.1:8765/messages \
 A VAPID private key is stored locally under `data/` and is never committed. The corresponding public key is configured in `.env` as `VAPID_PUBLIC_KEY`.
 
 Persistent runtime state is stored in `data/voice_bridge.db`, including push subscriptions and pending messages.
+## Agent bridge
+
+Voice Bridge does not run an agent runtime. It only forwards finalized STT turns to a configured agent endpoint and remains the shared TTS output channel.
+
+```text
+Browser STT -> Voice Bridge -> Agent endpoint
+                              -> runtime/model/tools
+Agent endpoint -> Voice Bridge /speak -> browser audio
+```
+
+Configure `AGENT_URL` to the base URL of an adapter that accepts `POST /turn`:
+
+```json
+{
+  "session_id": "stable-browser-session-id",
+  "text": "user utterance"
+}
+```
+
+Conversation history and session lifetime belong to the agent adapter, not Voice Bridge. The browser keeps a stable opaque session ID in local storage and sends it with each finalized push-to-talk utterance.

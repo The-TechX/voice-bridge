@@ -216,6 +216,13 @@
     let pendingMessageId = null;
     let incomingMessageId = null;
     let microphoneGranted = false;
+    let currentUtterance = '';
+    const agentSessionKey = 'tchxVoiceAgentSessionId';
+    let agentSessionId = localStorage.getItem(agentSessionKey);
+    if (!agentSessionId) {
+      agentSessionId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+      localStorage.setItem(agentSessionKey, agentSessionId);
+    }
 
     async function ensureMicrophonePermission() {
       if (microphoneGranted) return true;
@@ -243,6 +250,7 @@
       recognition.interimResults = true;
 
       recognition.onstart = () => {
+        currentUtterance = '';
         listening = true;
         mic.classList.add('listening');
         headline.textContent = 'Listening';
@@ -254,8 +262,13 @@
         let interim = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const text = event.results[i][0].transcript;
-          if (event.results[i].isFinal) committed += text.trim() + ' ';
-          else interim += text;
+          if (event.results[i].isFinal) {
+            const finalChunk = text.trim();
+            if (finalChunk) {
+              committed += finalChunk + ' ';
+              currentUtterance += finalChunk + ' ';
+            }
+          } else interim += text;
         }
         finalText.textContent = committed;
         interimText.textContent = interim;
@@ -271,7 +284,10 @@
         interimText.textContent = '';
         headline.textContent = 'Push to talk';
         subline.textContent = 'Press and hold the button while you speak. Release to stop.';
-        if (!state.textContent.startsWith('Error')) state.textContent = 'Ready';
+        const utterance = currentUtterance.trim();
+        currentUtterance = '';
+        if (utterance) sendToAgent(utterance);
+        else if (!state.textContent.startsWith('Error')) state.textContent = 'Ready';
       };
 
       const start = async event => {
@@ -297,6 +313,22 @@
         if (event.code === 'Space' || event.code === 'Enter') stop(event);
       });
 
+    }
+
+    async function sendToAgent(text) {
+      state.textContent = 'Thinking';
+      try {
+        const response = await fetch('/agent/turn', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: agentSessionId, text }),
+        });
+        if (!response.ok) throw new Error(`Agent returned ${response.status}`);
+        state.textContent = 'Waiting for voice';
+      } catch (error) {
+        console.error(error);
+        state.textContent = 'Agent unavailable';
+      }
     }
 
     const wsProtocol = location.protocol === 'https:' ? 'wss' : 'ws';
