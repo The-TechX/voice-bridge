@@ -181,6 +181,9 @@
     let incomingMessageId = null;
     let microphoneGranted = false;
     let currentUtterance = '';
+    const voiceAudio = new Audio();
+    let voiceAudioUrl = null;
+    let voiceAudioReady = false;
     const agentSessionKey = 'tchxVoiceAgentSessionId';
     let agentSessionId = localStorage.getItem(agentSessionKey);
     if (!agentSessionId) {
@@ -200,6 +203,17 @@
         subline.textContent = 'Allow microphone access to use push to talk.';
         return false;
       }
+    }
+
+    async function enableVoiceAudio() {
+      if (voiceAudioReady) return;
+      try {
+        voiceAudio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+        await voiceAudio.play();
+        voiceAudio.pause();
+        voiceAudio.currentTime = 0;
+        voiceAudioReady = true;
+      } catch {}
     }
 
     if (!SpeechRecognition) {
@@ -247,6 +261,7 @@
 
       const start = async event => {
         event.preventDefault();
+        enableVoiceAudio();
         if (!listening) {
           const allowed = await ensureMicrophonePermission();
           if (!allowed) return;
@@ -374,23 +389,25 @@
     }
 
     async function playAudioBuffer(arrayBuffer, messageId = null) {
-      const blob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-
-      const cleanup = () => URL.revokeObjectURL(url);
-      audio.onended = () => {
-        cleanup();
+      if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
+      voiceAudioUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'audio/mpeg' }));
+      voiceAudio.src = voiceAudioUrl;
+      voiceAudio.onended = () => {
+        if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
+        voiceAudioUrl = null;
         acknowledgeMessage(messageId);
+        state.textContent = 'Ready';
       };
-      audio.onerror = cleanup;
+      voiceAudio.onerror = () => {
+        if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
+        voiceAudioUrl = null;
+      };
 
       state.textContent = messageId ? 'Playing alert' : 'Speaking';
       try {
-        await audio.play();
+        await voiceAudio.play();
       } catch (error) {
         console.error(error);
-        cleanup();
         state.textContent = 'Tap once to enable audio';
       }
     }
