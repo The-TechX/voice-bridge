@@ -230,6 +230,7 @@
     }
 
     async function transcribeAudio(blob) {
+      const pipelineStarted = performance.now();
       state.textContent = 'Transcribing';
       const form = new FormData();
       const type = blob.type || 'application/octet-stream';
@@ -241,7 +242,8 @@
         if (!response.ok) throw new Error(`STT returned ${response.status}`);
         const payload = await response.json();
         const text = (payload.text || '').trim();
-        if (text) await sendToAgent(text);
+        if (text) await sendToAgent(text, pipelineStarted, payload.timing || {});
+
         else state.textContent = 'Ready';
       } catch (error) {
         console.error(error);
@@ -326,7 +328,7 @@
       window.addEventListener('load', ensureMicrophonePermission, { once: true });
     }
 
-    async function sendToAgent(text) {
+    async function sendToAgent(text, pipelineStarted, sttTiming = {}) {
       state.textContent = 'Thinking';
       try {
         const response = await fetch('/agent/turn', {
@@ -335,7 +337,39 @@
           body: JSON.stringify({ session_id: agentSessionId, text }),
         });
         if (!response.ok) throw new Error(`Agent returned ${response.status}`);
-        state.textContent = 'Waiting for voice';
+        const payload = await response.json();
+        const output = (payload.agent?.output || '').trim();
+        if (!output) {
+          state.textContent = 'Ready';
+          return;
+        }
+        if (payload.agent?.spoken) {
+          console.info('[voice-pipeline]', {
+            ...sttTiming,
+            ...(payload.timing || {}),
+            total_ms: Math.round(performance.now() - pipelineStarted),
+            tts_managed_by_agent: true,
+          });
+          state.textContent = 'Speaking';
+          return;
+        }
+
+        state.textContent = 'Synthesizing';
+        const speakResponse = await fetch('/speak', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: output }),
+        });
+        if (!speakResponse.ok) throw new Error(`TTS returned ${speakResponse.status}`);
+        const speakPayload = await speakResponse.json();
+        const totalMs = Math.round(performance.now() - pipelineStarted);
+        console.info('[voice-pipeline]', {
+          ...sttTiming,
+          ...(payload.timing || {}),
+          ...(speakPayload.timing || {}),
+          total_ms: totalMs,
+        });
+        state.textContent = 'Speaking';
       } catch (error) {
         console.error(error);
         state.textContent = 'Agent unavailable';

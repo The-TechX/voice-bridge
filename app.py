@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -133,6 +134,7 @@ async def stt_transcribe(file: UploadFile = File(...)):
     if not STT_URL:
         raise HTTPException(status_code=503, detail="STT_URL is not configured")
 
+    request_started = time.perf_counter()
     audio = await file.read()
     if not audio:
         raise HTTPException(status_code=400, detail="Audio payload is empty")
@@ -159,11 +161,13 @@ async def stt_transcribe(file: UploadFile = File(...)):
         raise HTTPException(status_code=502, detail="STT returned invalid JSON") from exc
 
     text = str(payload.get("text", "")).strip()
-    return {"status": "ok", "text": text, "stt": payload}
+    elapsed_ms = round((time.perf_counter() - request_started) * 1000, 1)
+    return {"status": "ok", "text": text, "stt": payload, "timing": {"stt_ms": elapsed_ms}}
 
 
 @app.post("/agent/turn")
 async def agent_turn(request: AgentTurnRequest):
+    request_started = time.perf_counter()
     if not AGENT_URL:
         raise HTTPException(status_code=503, detail="AGENT_URL is not configured")
 
@@ -184,7 +188,8 @@ async def agent_turn(request: AgentTurnRequest):
         payload = response.json()
     except ValueError:
         payload = {"status": "ok"}
-    return {"status": "ok", "agent": payload}
+    elapsed_ms = round((time.perf_counter() - request_started) * 1000, 1)
+    return {"status": "ok", "agent": payload, "timing": {"agent_ms": elapsed_ms}}
 
 
 @app.get("/push/public-key")
@@ -406,12 +411,19 @@ async def broadcast_message_audio(message_id: str, audio: bytes) -> int:
 
 @app.post("/speak")
 async def speak(request: SpeakRequest):
+    request_started = time.perf_counter()
+    tts_started = time.perf_counter()
     audio = await synthesize_audio(request.text, request.reference_id)
+    tts_ms = round((time.perf_counter() - tts_started) * 1000, 1)
+    broadcast_started = time.perf_counter()
     delivered = await broadcast_audio(audio)
+    broadcast_ms = round((time.perf_counter() - broadcast_started) * 1000, 1)
+    total_ms = round((time.perf_counter() - request_started) * 1000, 1)
     return {
         "status": "ok",
         "model": FISH_MODEL,
         "format": "mp3",
         "bytes": len(audio),
         "delivered_to": delivered,
+        "timing": {"tts_ms": tts_ms, "broadcast_ms": broadcast_ms, "speak_total_ms": total_ms},
     }
