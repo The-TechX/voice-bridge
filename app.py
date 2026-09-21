@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -190,6 +191,94 @@ async def agent_turn(request: AgentTurnRequest):
         payload = {"status": "ok"}
     elapsed_ms = round((time.perf_counter() - request_started) * 1000, 1)
     return {"status": "ok", "agent": payload, "timing": {"agent_ms": elapsed_ms}}
+
+
+def pop_speech_chunks(buffer: str, final: bool = False) -> tuple[list[str], str]:
+    chunks: list[str] = []
+    buffer = buffer.strip()
+    # Prefer complete spoken phrases. Commas are accepted only after enough text
+    # so Fish is not flooded with tiny requests.
+    while buffer:
+        match = re.search(r"(?<=[.!?])\s+|(?<=,)\s+(?=.{28,})", buffer)
+        if not match:
+            break
+        candidate = buffer[:match.start()].strip()
+        buffer = buffer[match.end():].strip()
+        if candidate:
+            chunks.append(candidate)
+    if final and buffer:
+        chunks.append(buffer)
+        buffer = ""
+    return chunks, buffer
+
+
+@app.post("/agent/turn/stream")
+async def agent_turn_stream(request: AgentTurnRequest):
+    if not AGENT_URL:
+        raise HTTPException(status_code=503, detail="AGENT_URL is not configured")
+
+    started = time.perf_counter()
+    buffer = ""
+    output = ""
+    chunk_count = 0
+    first_audio_ms = None
+    tts_total_ms = 0.0
+    model_ms = None
+    ttft_ms = None
+
+    try:
+        async with httpx.AsyncClient(timeout=AGENT_TIMEOUT_SECONDS) as client:
+            async with client.stream(
+                "POST",
+                f"{AGENT_URL}/turn/stream",
+                json={"session_id": request.session_id, "text": request.text},
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    event = json.loads(line)
+                    if event.get("type") == "delta":
+                        delta = str(event.get("text", ""))
+                        output += delta
+                        buffer += delta
+                        chunks, buffer = pop_speech_chunks(buffer)
+                        for chunk in chunks:
+                            tts_started = time.perf_counter()
+                            audio = await synthesize_audio(chunk)
+                            tts_total_ms += round((time.perf_counter() - tts_started) * 1000, 1)
+                            await broadcast_audio(audio)
+                            chunk_count += 1
+                            if first_audio_ms is None:
+                                first_audio_ms = round((time.perf_counter() - started) * 1000, 1)
+                    elif event.get("type") == "done":
+                        model_ms = event.get("model_ms")
+                        ttft_ms = event.get("ttft_ms")
+
+        chunks, buffer = pop_speech_chunks(buffer, final=True)
+        for chunk in chunks:
+            tts_started = time.perf_counter()
+            audio = await synthesize_audio(chunk)
+            tts_total_ms += round((time.perf_counter() - tts_started) * 1000, 1)
+            await broadcast_audio(audio)
+            chunk_count += 1
+            if first_audio_ms is None:
+                first_audio_ms = round((time.perf_counter() - started) * 1000, 1)
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Streaming agent request failed: {exc}") from exc
+
+    return {
+        "status": "ok",
+        "agent": {"output": output, "spoken": True},
+        "timing": {
+            "ttft_ms": ttft_ms,
+            "model_ms": model_ms,
+            "tts_total_ms": round(tts_total_ms, 1),
+            "first_audio_ms": first_audio_ms,
+            "total_ms": round((time.perf_counter() - started) * 1000, 1),
+            "chunks": chunk_count,
+        },
+    }
 
 
 @app.get("/push/public-key")

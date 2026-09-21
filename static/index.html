@@ -334,7 +334,7 @@
       metrics.agent_started_ms = performance.now();
       state.textContent = 'Thinking';
       try {
-        const response = await fetch('/agent/turn', {
+        const response = await fetch('/agent/turn/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ session_id: agentSessionId, text }),
@@ -350,12 +350,15 @@
         if (payload.agent?.spoken) {
           console.info('[voice-pipeline]', {
             stt_ms: sttTiming.stt_ms,
-            agent_endpoint_ms: payload.timing?.agent_ms,
-            agent_model_ms: payload.agent?.model_elapsed_ms ?? payload.agent?.elapsed_ms,
-            agent_speak_ms: payload.agent?.speak_elapsed_ms,
+            agent_endpoint_ms: Math.round(metrics.agent_complete_ms - metrics.agent_started_ms),
+            agent_model_ms: payload.timing?.model_ms,
+            agent_ttft_ms: payload.timing?.ttft_ms,
+            tts_total_ms: payload.timing?.tts_total_ms,
+            chunks: payload.timing?.chunks,
+            time_to_first_audio_ms: sttTiming.stt_ms + (payload.timing?.first_audio_ms || 0),
             time_to_agent_complete_ms: Math.round(metrics.agent_complete_ms - pipelineStarted),
             total_until_agent_return_ms: Math.round(performance.now() - pipelineStarted),
-            tts_managed_by_agent: true,
+            streaming_chunks: true,
           });
           state.textContent = 'Speaking';
           return;
