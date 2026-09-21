@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field
 from pywebpush import WebPushException, webpush
 
 app = FastAPI(title="voice-bridge", version="0.4.0")
+logger = logging.getLogger("uvicorn.error")
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
 DATA_DIR = Path(os.getenv("VOICE_BRIDGE_DATA_DIR", "/app/data"))
@@ -264,6 +266,12 @@ async def agent_turn_stream(request: AgentTurnRequest):
                         buffer += delta
                         chunks, buffer = pop_speech_chunks(buffer, first_chunk=(chunk_count == 0))
                         for chunk in chunks:
+                            logger.info(
+                                "speech_chunk session=%s chunk=%d text=%s",
+                                request.session_id,
+                                chunk_count + 1,
+                                json.dumps(chunk, ensure_ascii=False),
+                            )
                             if first_chunk_ready_ms is None:
                                 first_chunk_ready_ms = round((time.perf_counter() - started) * 1000, 1)
                                 first_chunk_words = len(_words(chunk))
@@ -277,12 +285,24 @@ async def agent_turn_stream(request: AgentTurnRequest):
                             chunk_count += 1
                             if first_audio_ms is None:
                                 first_audio_ms = round((time.perf_counter() - started) * 1000, 1)
+                    elif event.get("type") in {"tool_start", "tool_end"}:
+                        logger.info(
+                            "agent_event session=%s event=%s",
+                            request.session_id,
+                            json.dumps(event, ensure_ascii=False),
+                        )
                     elif event.get("type") == "done":
                         model_ms = event.get("model_ms")
                         ttft_ms = event.get("ttft_ms")
 
         chunks, buffer = pop_speech_chunks(buffer, final=True, first_chunk=(chunk_count == 0))
         for chunk in chunks:
+            logger.info(
+                "speech_chunk session=%s chunk=%d text=%s",
+                request.session_id,
+                chunk_count + 1,
+                json.dumps(chunk, ensure_ascii=False),
+            )
             tts_started = time.perf_counter()
             audio = await synthesize_audio(chunk)
             tts_total_ms += round((time.perf_counter() - tts_started) * 1000, 1)
