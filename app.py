@@ -193,85 +193,36 @@ async def agent_turn(request: AgentTurnRequest):
     return {"status": "ok", "agent": payload, "timing": {"agent_ms": elapsed_ms}}
 
 
-FRAGILE_END_WORDS = {
-    "a", "al", "de", "del", "el", "la", "los", "las", "un", "una", "unos", "unas",
-    "con", "en", "para", "por", "sin", "sobre", "y", "e", "o", "u", "que",
-}
-CONNECTOR_WORDS = {
-    "además", "aunque", "así", "entonces", "pero", "porque", "mientras", "cuando",
-    "también", "sin", "por", "y",
-}
-
-
 def _words(text: str) -> list[str]:
     return re.findall(r"\b[\wÁÉÍÓÚÜÑáéíóúüñ]+\b", text, flags=re.UNICODE)
-
-
-def _safe_end(text: str) -> bool:
-    words = _words(text)
-    return bool(words) and words[-1].lower() not in FRAGILE_END_WORDS
-
-
-def _best_phrase_cut(buffer: str, min_words: int, target_words: int, max_words: int) -> int | None:
-    matches = list(re.finditer(r"\S+", buffer))
-    if len(matches) < min_words:
-        return None
-
-    # A completed sentence is always the strongest spoken boundary.
-    sentence = re.search(r"[.!?](?:\s+|$)", buffer)
-    if sentence and len(_words(buffer[:sentence.end()])) >= min_words:
-        return sentence.end()
-
-    candidates: list[tuple[int, int]] = []
-    for i, match in enumerate(matches[:max_words], start=1):
-        if i < min_words:
-            continue
-        end = match.end()
-        prefix = buffer[:end]
-        token = match.group(0).strip(".,;:!?").lower()
-        score = 0
-        if match.group(0).endswith((",", ";", ":")):
-            score = 3
-        elif token in CONNECTOR_WORDS and i > min_words:
-            # Cut before a connector so the next phrase starts naturally.
-            before = match.start()
-            if _safe_end(buffer[:before]):
-                candidates.append((abs((i - 1) - target_words), before))
-            continue
-        elif i >= target_words:
-            score = 1
-        if score and _safe_end(prefix):
-            # Prefer boundaries near target length, then stronger punctuation.
-            candidates.append((abs(i - target_words) * 10 - score, end))
-
-    if candidates:
-        candidates.sort(key=lambda item: item[0])
-        return candidates[0][1]
-
-    if len(matches) >= max_words:
-        for match in reversed(matches[:max_words]):
-            end = match.end()
-            if _safe_end(buffer[:end]):
-                return end
-    return None
 
 
 def pop_speech_chunks(buffer: str, final: bool = False, first_chunk: bool = False) -> tuple[list[str], str]:
     chunks: list[str] = []
     buffer = buffer.strip()
-    while buffer:
-        if first_chunk and not chunks:
-            min_words, target_words, max_words = 5, 7, 10
-        else:
-            min_words, target_words, max_words = 8, 13, 18
 
-        cut = _best_phrase_cut(buffer, min_words, target_words, max_words)
-        if cut is None:
+    # Preserve TTS prosody: only split where the model explicitly wrote a
+    # spoken pause. Periods/questions/exclamations are strongest; commas,
+    # semicolons and colons are also valid phrase boundaries.
+    while buffer:
+        boundaries = list(re.finditer(r"[.!?](?:\s+|$)|[,;:](?:\s+|$)", buffer))
+        if not boundaries:
             break
-        candidate = buffer[:cut].strip(" ,;:")
-        buffer = buffer[cut:].lstrip(" ,;:")
+
+        boundary = boundaries[0]
+        candidate = buffer[:boundary.end()].strip()
+        # Avoid tiny comma-only chunks such as "Claro,". If another punctuation
+        # boundary is already available, merge into it: "Claro, te explico."
+        if boundary.group(0).lstrip().startswith((",", ";", ":")) and len(_words(candidate)) < 3:
+            if len(boundaries) < 2:
+                break
+            boundary = boundaries[1]
+            candidate = buffer[:boundary.end()].strip()
+
+        buffer = buffer[boundary.end():].strip()
         if candidate:
             chunks.append(candidate)
+
     if final and buffer:
         chunks.append(buffer)
         buffer = ""
