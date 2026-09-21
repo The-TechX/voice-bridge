@@ -179,6 +179,8 @@
     let mediaRecorder = null;
     let mediaStream = null;
     let audioChunks = [];
+    const speechQueue = [];
+    let speechPlaying = false;
     let pendingMessageId = null;
     let incomingMessageId = null;
     let microphoneGranted = false;
@@ -479,27 +481,36 @@
     }
 
     async function playAudioBuffer(arrayBuffer, messageId = null) {
-      if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
-      voiceAudioUrl = URL.createObjectURL(new Blob([arrayBuffer], { type: 'audio/mpeg' }));
-      voiceAudio.src = voiceAudioUrl;
-      voiceAudio.onended = () => {
-        if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
-        voiceAudioUrl = null;
-        acknowledgeMessage(messageId);
-        state.textContent = 'Ready';
-      };
-      voiceAudio.onerror = () => {
-        if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
-        voiceAudioUrl = null;
-      };
+      speechQueue.push({ arrayBuffer, messageId });
+      if (speechPlaying) return;
 
-      state.textContent = messageId ? 'Playing alert' : 'Speaking';
-      try {
-        await voiceAudio.play();
-      } catch (error) {
-        console.error(error);
-        state.textContent = 'Tap once to enable audio';
+      speechPlaying = true;
+      while (speechQueue.length) {
+        const item = speechQueue.shift();
+        if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
+        voiceAudioUrl = URL.createObjectURL(new Blob([item.arrayBuffer], { type: 'audio/mpeg' }));
+        voiceAudio.src = voiceAudioUrl;
+        state.textContent = item.messageId ? 'Playing alert' : 'Speaking';
+
+        try {
+          await new Promise((resolve, reject) => {
+            voiceAudio.onended = resolve;
+            voiceAudio.onerror = reject;
+            voiceAudio.play().catch(reject);
+          });
+          acknowledgeMessage(item.messageId);
+        } catch (error) {
+          console.error(error);
+          state.textContent = 'Tap once to enable audio';
+          speechQueue.length = 0;
+          break;
+        } finally {
+          if (voiceAudioUrl) URL.revokeObjectURL(voiceAudioUrl);
+          voiceAudioUrl = null;
+        }
       }
+      speechPlaying = false;
+      state.textContent = 'Ready';
     }
 
     async function playMessage(messageId) {

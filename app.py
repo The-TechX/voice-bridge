@@ -196,10 +196,10 @@ async def agent_turn(request: AgentTurnRequest):
 def pop_speech_chunks(buffer: str, final: bool = False) -> tuple[list[str], str]:
     chunks: list[str] = []
     buffer = buffer.strip()
-    # Prefer complete spoken phrases. Commas are accepted only after enough text
-    # so Fish is not flooded with tiny requests.
+    # Only split on completed sentences. Mid-sentence comma chunks sound
+    # unnatural because each Fish request is synthesized independently.
     while buffer:
-        match = re.search(r"(?<=[.!?])\s+|(?<=,)\s+(?=.{28,})", buffer)
+        match = re.search(r"(?<=[.!?])\s+", buffer)
         if not match:
             break
         candidate = buffer[:match.start()].strip()
