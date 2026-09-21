@@ -193,17 +193,83 @@ async def agent_turn(request: AgentTurnRequest):
     return {"status": "ok", "agent": payload, "timing": {"agent_ms": elapsed_ms}}
 
 
-def pop_speech_chunks(buffer: str, final: bool = False) -> tuple[list[str], str]:
+FRAGILE_END_WORDS = {
+    "a", "al", "de", "del", "el", "la", "los", "las", "un", "una", "unos", "unas",
+    "con", "en", "para", "por", "sin", "sobre", "y", "e", "o", "u", "que",
+}
+CONNECTOR_WORDS = {
+    "además", "aunque", "así", "entonces", "pero", "porque", "mientras", "cuando",
+    "también", "sin", "por", "y",
+}
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"\b[\wÁÉÍÓÚÜÑáéíóúüñ]+\b", text, flags=re.UNICODE)
+
+
+def _safe_end(text: str) -> bool:
+    words = _words(text)
+    return bool(words) and words[-1].lower() not in FRAGILE_END_WORDS
+
+
+def _best_phrase_cut(buffer: str, min_words: int, target_words: int, max_words: int) -> int | None:
+    matches = list(re.finditer(r"\S+", buffer))
+    if len(matches) < min_words:
+        return None
+
+    # A completed sentence is always the strongest spoken boundary.
+    sentence = re.search(r"[.!?](?:\s+|$)", buffer)
+    if sentence and len(_words(buffer[:sentence.end()])) >= min_words:
+        return sentence.end()
+
+    candidates: list[tuple[int, int]] = []
+    for i, match in enumerate(matches[:max_words], start=1):
+        if i < min_words:
+            continue
+        end = match.end()
+        prefix = buffer[:end]
+        token = match.group(0).strip(".,;:!?").lower()
+        score = 0
+        if match.group(0).endswith((",", ";", ":")):
+            score = 3
+        elif token in CONNECTOR_WORDS and i > min_words:
+            # Cut before a connector so the next phrase starts naturally.
+            before = match.start()
+            if _safe_end(buffer[:before]):
+                candidates.append((abs((i - 1) - target_words), before))
+            continue
+        elif i >= target_words:
+            score = 1
+        if score and _safe_end(prefix):
+            # Prefer boundaries near target length, then stronger punctuation.
+            candidates.append((abs(i - target_words) * 10 - score, end))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+
+    if len(matches) >= max_words:
+        for match in reversed(matches[:max_words]):
+            end = match.end()
+            if _safe_end(buffer[:end]):
+                return end
+    return None
+
+
+def pop_speech_chunks(buffer: str, final: bool = False, first_chunk: bool = False) -> tuple[list[str], str]:
     chunks: list[str] = []
     buffer = buffer.strip()
-    # Only split on completed sentences. Mid-sentence comma chunks sound
-    # unnatural because each Fish request is synthesized independently.
     while buffer:
-        match = re.search(r"(?<=[.!?])\s+", buffer)
-        if not match:
+        if first_chunk and not chunks:
+            min_words, target_words, max_words = 5, 7, 10
+        else:
+            min_words, target_words, max_words = 8, 13, 18
+
+        cut = _best_phrase_cut(buffer, min_words, target_words, max_words)
+        if cut is None:
             break
-        candidate = buffer[:match.start()].strip()
-        buffer = buffer[match.end():].strip()
+        candidate = buffer[:cut].strip(" ,;:")
+        buffer = buffer[cut:].lstrip(" ,;:")
         if candidate:
             chunks.append(candidate)
     if final and buffer:
@@ -221,6 +287,9 @@ async def agent_turn_stream(request: AgentTurnRequest):
     buffer = ""
     output = ""
     chunk_count = 0
+    first_chunk_ready_ms = None
+    first_chunk_words = None
+    first_tts_ms = None
     first_audio_ms = None
     tts_total_ms = 0.0
     model_ms = None
@@ -242,11 +311,17 @@ async def agent_turn_stream(request: AgentTurnRequest):
                         delta = str(event.get("text", ""))
                         output += delta
                         buffer += delta
-                        chunks, buffer = pop_speech_chunks(buffer)
+                        chunks, buffer = pop_speech_chunks(buffer, first_chunk=(chunk_count == 0))
                         for chunk in chunks:
+                            if first_chunk_ready_ms is None:
+                                first_chunk_ready_ms = round((time.perf_counter() - started) * 1000, 1)
+                                first_chunk_words = len(_words(chunk))
                             tts_started = time.perf_counter()
                             audio = await synthesize_audio(chunk)
-                            tts_total_ms += round((time.perf_counter() - tts_started) * 1000, 1)
+                            chunk_tts_ms = round((time.perf_counter() - tts_started) * 1000, 1)
+                            tts_total_ms += chunk_tts_ms
+                            if first_tts_ms is None:
+                                first_tts_ms = chunk_tts_ms
                             await broadcast_audio(audio)
                             chunk_count += 1
                             if first_audio_ms is None:
@@ -255,7 +330,7 @@ async def agent_turn_stream(request: AgentTurnRequest):
                         model_ms = event.get("model_ms")
                         ttft_ms = event.get("ttft_ms")
 
-        chunks, buffer = pop_speech_chunks(buffer, final=True)
+        chunks, buffer = pop_speech_chunks(buffer, final=True, first_chunk=(chunk_count == 0))
         for chunk in chunks:
             tts_started = time.perf_counter()
             audio = await synthesize_audio(chunk)
@@ -274,6 +349,9 @@ async def agent_turn_stream(request: AgentTurnRequest):
             "ttft_ms": ttft_ms,
             "model_ms": model_ms,
             "tts_total_ms": round(tts_total_ms, 1),
+            "first_chunk_ready_ms": first_chunk_ready_ms,
+            "first_chunk_words": first_chunk_words,
+            "first_tts_ms": first_tts_ms,
             "first_audio_ms": first_audio_ms,
             "total_ms": round((time.perf_counter() - started) * 1000, 1),
             "chunks": chunk_count,
