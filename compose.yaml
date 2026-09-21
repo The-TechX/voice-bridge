@@ -12,5 +12,17 @@ services:
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
       VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:push@tchx.dev}
       VOICE_BRIDGE_DATA_DIR: /app/data
+      AGENT_URL: ${AGENT_URL:-}
+      AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-60}
+      STT_URL: ${STT_URL:-}
+      STT_TIMEOUT_SECONDS: ${STT_TIMEOUT_SECONDS:-30}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
+    networks:
+      - voice-services
+
+networks:
+  voice-services:
+    external: true
