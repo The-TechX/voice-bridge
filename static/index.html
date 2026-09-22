@@ -181,6 +181,8 @@
     let audioChunks = [];
     const speechQueue = [];
     let speechPlaying = false;
+    let streamingAudioContext = null;
+    let streamingAudioCursor = 0;
     let pendingMessageId = null;
     let incomingMessageId = null;
     let microphoneGranted = false;
@@ -208,15 +210,38 @@
       }
     }
 
-    async function enableVoiceAudio() {
-      if (voiceAudioReady) return;
+    function ensureStreamingAudioContext() {
+      if (streamingAudioContext && streamingAudioContext.state !== 'closed') return streamingAudioContext;
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
       try {
-        voiceAudio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
-        await voiceAudio.play();
-        voiceAudio.pause();
-        voiceAudio.currentTime = 0;
-        voiceAudioReady = true;
-      } catch {}
+        streamingAudioContext = new AudioContextCtor({ sampleRate: 24000 });
+      } catch (_) {
+        streamingAudioContext = new AudioContextCtor();
+      }
+      streamingAudioCursor = 0;
+      return streamingAudioContext;
+    }
+
+    function enableVoiceAudio() {
+      try {
+        const context = ensureStreamingAudioContext();
+        // Prime streaming playback from the PTT gesture. Desktop browsers keep
+        // this context available for the subsequent streamed PCM response.
+        if (context.state === 'suspended') context.resume().catch(error => console.error('Audio resume failed', error));
+
+        // Notifications still use HTMLAudio, so prime that path as well.
+        if (!voiceAudioReady) {
+          voiceAudio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+          const playPromise = voiceAudio.play();
+          if (playPromise) playPromise.then(() => {
+            voiceAudio.pause();
+            voiceAudio.currentTime = 0;
+            voiceAudioReady = true;
+          }).catch(error => console.error('HTML audio unlock failed', error));
+        }
+      } catch (error) {
+        console.error('Audio unlock failed', error);
+      }
     }
 
     function resetMicUi() {
@@ -293,7 +318,9 @@
           if (blob.size) await transcribeAudio(blob);
           else state.textContent = 'Ready';
         };
-        mediaRecorder.start();
+        // Emit complete WebM clusters while recording. This avoids Safari/Chromium
+        // occasionally producing a truncated final blob when stop() is the first flush.
+        mediaRecorder.start(250);
         listening = true;
         mic.classList.add('listening');
         headline.textContent = 'Listening';
@@ -311,7 +338,13 @@
     function stopRecording(event) {
       event.preventDefault();
       recordingRequested = false;
-      if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        // Ask MediaRecorder to flush the current cluster before stopping. The final
+        // dataavailable event is delivered before onstop, so onstop can safely build
+        // the complete blob without racing the recorder shutdown.
+        try { mediaRecorder.requestData(); } catch (_) {}
+        mediaRecorder.stop();
+      }
       else if (!listening) resetMicUi();
     }
 
@@ -355,14 +388,16 @@
             agent_endpoint_ms: Math.round(metrics.agent_complete_ms - metrics.agent_started_ms),
             agent_model_ms: payload.timing?.model_ms,
             agent_ttft_ms: payload.timing?.ttft_ms,
-            tts_total_ms: payload.timing?.tts_total_ms,
-            chunks: payload.timing?.chunks,
+            tts_transport: payload.timing?.tts_transport,
+            tts_audio_chunks: payload.timing?.tts_audio_chunks,
             time_to_first_audio_ms: sttTiming.stt_ms + (payload.timing?.first_audio_ms || 0),
             time_to_agent_complete_ms: Math.round(metrics.agent_complete_ms - pipelineStarted),
             total_until_agent_return_ms: Math.round(performance.now() - pipelineStarted),
             streaming_chunks: true,
           });
-          state.textContent = 'Speaking';
+          // Streaming playback owns the Speaking/Ready state. Do not force the
+          // UI back to Speaking after the HTTP request finishes; audio may have
+          // already completed by then.
           return;
         }
 
@@ -480,6 +515,36 @@
       } catch {}
     }
 
+    async function playStreamingPcm(arrayBuffer) {
+      if (!arrayBuffer || !arrayBuffer.byteLength) return;
+      const context = ensureStreamingAudioContext();
+      if (context.state === 'suspended') {
+        await context.resume();
+      }
+      if (context.state !== 'running') {
+        console.error('Streaming AudioContext is not running:', context.state);
+        state.textContent = 'Tap mic to enable audio';
+        return;
+      }
+
+      const samples = new Int16Array(arrayBuffer);
+      const audioBuffer = streamingAudioContext.createBuffer(1, samples.length, 24000);
+      const channel = audioBuffer.getChannelData(0);
+      for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 32768;
+
+      const source = streamingAudioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(streamingAudioContext.destination);
+      const now = streamingAudioContext.currentTime;
+      if (streamingAudioCursor < now + 0.02) streamingAudioCursor = now + 0.02;
+      source.start(streamingAudioCursor);
+      streamingAudioCursor += audioBuffer.duration;
+      state.textContent = 'Speaking';
+      source.onended = () => {
+        if (streamingAudioContext && streamingAudioCursor <= streamingAudioContext.currentTime + 0.05) state.textContent = 'Ready';
+      };
+    }
+
     async function playAudioBuffer(arrayBuffer, messageId = null) {
       speechQueue.push({ arrayBuffer, messageId });
       if (speechPlaying) return;
@@ -584,11 +649,12 @@
         const messageId = incomingMessageId;
         incomingMessageId = null;
         if (event.data instanceof ArrayBuffer) {
-          playAudioBuffer(event.data, messageId);
+          if (messageId) playAudioBuffer(event.data, messageId);
+          else playStreamingPcm(event.data);
           return;
         }
         if (event.data instanceof Blob) {
-          event.data.arrayBuffer().then(buffer => playAudioBuffer(buffer, messageId));
+          event.data.arrayBuffer().then(buffer => messageId ? playAudioBuffer(buffer, messageId) : playStreamingPcm(buffer));
         }
       };
 

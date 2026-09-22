@@ -1,8 +1,8 @@
 import asyncio
+import base64
 import json
 import logging
 import os
-import re
 import sqlite3
 import time
 import uuid
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Set
 
 import httpx
+import websockets
 from fastapi import FastAPI, File, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +29,9 @@ VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "")
 VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:push@tchx.dev")
 FISH_TTS_URL = "https://api.fish.audio/v1/tts"
 FISH_MODEL = "s2.1-pro-free"
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "8mBRP99B2Ng2QwsJMFQl")
+ELEVENLABS_STREAM_WORDS = int(os.getenv("ELEVENLABS_STREAM_WORDS", "7"))
 AGENT_URL = os.getenv("AGENT_URL", "").rstrip("/")
 AGENT_TIMEOUT_SECONDS = float(os.getenv("AGENT_TIMEOUT_SECONDS", "60"))
 STT_URL = os.getenv("STT_URL", "").rstrip("/")
@@ -124,7 +128,7 @@ async def health():
         "increment": "agent-session-bridge",
         "agent_configured": bool(AGENT_URL),
         "stt_configured": bool(STT_URL),
-        "tts_configured": bool(os.getenv("FISH_API_KEY")),
+        "tts_configured": bool(os.getenv("FISH_API_KEY") or os.getenv("ELEVENLABS_API_KEY") or Path(os.getenv("ELEVENLABS_API_KEY_FILE", "/run/secrets/elevenlabs_api_key")).exists()),
         "push_configured": bool(VAPID_PUBLIC_KEY and Path(VAPID_PRIVATE_KEY).exists()),
         "connected_clients": len(clients),
         "push_subscriptions": subscriptions,
@@ -165,6 +169,17 @@ async def stt_transcribe(file: UploadFile = File(...)):
 
     text = str(payload.get("text", "")).strip()
     elapsed_ms = round((time.perf_counter() - request_started) * 1000, 1)
+    logger.info(
+        "stt_transcript text=%r language=%s probability=%s audio_seconds=%s inference_seconds=%s total_ms=%s bytes=%s content_type=%s",
+        text,
+        payload.get("language"),
+        payload.get("language_probability"),
+        payload.get("audio_seconds"),
+        payload.get("inference_seconds"),
+        elapsed_ms,
+        len(audio),
+        content_type,
+    )
     return {"status": "ok", "text": text, "stt": payload, "timing": {"stt_ms": elapsed_ms}}
 
 
@@ -195,59 +210,85 @@ async def agent_turn(request: AgentTurnRequest):
     return {"status": "ok", "agent": payload, "timing": {"agent_ms": elapsed_ms}}
 
 
-def _words(text: str) -> list[str]:
-    return re.findall(r"\b[\wÁÉÍÓÚÜÑáéíóúüñ]+\b", text, flags=re.UNICODE)
-
-
-def pop_speech_chunks(buffer: str, final: bool = False, first_chunk: bool = False) -> tuple[list[str], str]:
-    chunks: list[str] = []
-    buffer = buffer.strip()
-
-    # Preserve TTS prosody: only split where the model explicitly wrote a
-    # spoken pause. Periods/questions/exclamations are strongest; commas,
-    # semicolons and colons are also valid phrase boundaries.
-    while buffer:
-        boundaries = list(re.finditer(r"[.!?](?:\s+|$)|[,;:](?:\s+|$)", buffer))
-        if not boundaries:
-            break
-
-        boundary = boundaries[0]
-        candidate = buffer[:boundary.end()].strip()
-        # Avoid tiny comma-only chunks such as "Claro,". If another punctuation
-        # boundary is already available, merge into it: "Claro, te explico."
-        if boundary.group(0).lstrip().startswith((",", ";", ":")) and len(_words(candidate)) < 3:
-            if len(boundaries) < 2:
-                break
-            boundary = boundaries[1]
-            candidate = buffer[:boundary.end()].strip()
-
-        buffer = buffer[boundary.end():].strip()
-        if candidate:
-            chunks.append(candidate)
-
-    if final and buffer:
-        chunks.append(buffer)
-        buffer = ""
-    return chunks, buffer
-
-
 @app.post("/agent/turn/stream")
 async def agent_turn_stream(request: AgentTurnRequest):
     if not AGENT_URL:
         raise HTTPException(status_code=503, detail="AGENT_URL is not configured")
 
     started = time.perf_counter()
-    buffer = ""
     output = ""
-    chunk_count = 0
-    first_chunk_ready_ms = None
-    first_chunk_words = None
-    first_tts_ms = None
     first_audio_ms = None
-    tts_total_ms = 0.0
     model_ms = None
     ttft_ms = None
 
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
+    key_file = os.getenv("ELEVENLABS_API_KEY_FILE", "/run/secrets/elevenlabs_api_key")
+    if not elevenlabs_key:
+        try:
+            elevenlabs_key = Path(key_file).read_text().strip()
+        except OSError:
+            pass
+    if not elevenlabs_key:
+        raise HTTPException(status_code=503, detail="ELEVENLABS_API_KEY is not configured")
+
+    text_queue: asyncio.Queue[str | None | tuple[str, str]] = asyncio.Queue()
+    audio_chunks = 0
+
+    async def eleven_text_stream():
+        buffer = ""
+        while True:
+            delta = await text_queue.get()
+            if delta is None:
+                if buffer:
+                    yield buffer
+                return
+            if isinstance(delta, tuple) and delta[0] == "commentary":
+                if buffer:
+                    yield buffer
+                    buffer = ""
+                yield delta[1]
+                continue
+            buffer += delta
+            if len(buffer.split()) >= ELEVENLABS_STREAM_WORDS:
+                split_at = buffer.rfind(" ")
+                if split_at > 0:
+                    yield buffer[:split_at + 1]
+                    buffer = buffer[split_at + 1:]
+
+    async def elevenlabs_tts():
+        nonlocal first_audio_ms, audio_chunks
+        uri = (
+            f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input"
+            f"?model_id={ELEVENLABS_MODEL}&output_format=pcm_24000"
+        )
+        async with websockets.connect(uri, additional_headers={"xi-api-key": elevenlabs_key}) as ws:
+            await ws.send(json.dumps({
+                "text": " ",
+                "voice_settings": {"stability": 0.65, "similarity_boost": 0.8, "style": 0.0, "use_speaker_boost": True},
+                "generation_config": {"chunk_length_schedule": [50, 90, 120, 150]},
+            }))
+            async def sender():
+                async for text_part in eleven_text_stream():
+                    await ws.send(json.dumps({"text": text_part, "try_trigger_generation": True}))
+                await ws.send(json.dumps({"text": ""}))
+            send_task = asyncio.create_task(sender())
+            try:
+                async for message in ws:
+                    data = json.loads(message)
+                    encoded = data.get("audio")
+                    if encoded:
+                        audio = base64.b64decode(encoded)
+                        if first_audio_ms is None:
+                            first_audio_ms = round((time.perf_counter() - started) * 1000, 1)
+                        audio_chunks += 1
+                        delivered = await broadcast_audio(audio)
+                        logger.info("tts_audio_chunk chunk=%d bytes=%d delivered=%d", audio_chunks, len(audio), delivered)
+                    if data.get("isFinal"):
+                        break
+            finally:
+                await send_task
+
+    tts_task = asyncio.create_task(elevenlabs_tts())
     try:
         async with httpx.AsyncClient(timeout=AGENT_TIMEOUT_SECONDS) as client:
             async with client.stream(
@@ -260,31 +301,19 @@ async def agent_turn_stream(request: AgentTurnRequest):
                     if not line:
                         continue
                     event = json.loads(line)
+                    if event.get("type") == "commentary":
+                        commentary = str(event.get("text", ""))
+                        output += commentary
+                        if commentary:
+                            await text_queue.put(("commentary", commentary))
+                        logger.info("agent_commentary session=%s text=%s", request.session_id, json.dumps(commentary, ensure_ascii=False))
+                        continue
                     if event.get("type") == "delta":
                         delta = str(event.get("text", ""))
                         output += delta
-                        buffer += delta
-                        chunks, buffer = pop_speech_chunks(buffer, first_chunk=(chunk_count == 0))
-                        for chunk in chunks:
-                            logger.info(
-                                "speech_chunk session=%s chunk=%d text=%s",
-                                request.session_id,
-                                chunk_count + 1,
-                                json.dumps(chunk, ensure_ascii=False),
-                            )
-                            if first_chunk_ready_ms is None:
-                                first_chunk_ready_ms = round((time.perf_counter() - started) * 1000, 1)
-                                first_chunk_words = len(_words(chunk))
-                            tts_started = time.perf_counter()
-                            audio = await synthesize_audio(chunk)
-                            chunk_tts_ms = round((time.perf_counter() - tts_started) * 1000, 1)
-                            tts_total_ms += chunk_tts_ms
-                            if first_tts_ms is None:
-                                first_tts_ms = chunk_tts_ms
-                            await broadcast_audio(audio)
-                            chunk_count += 1
-                            if first_audio_ms is None:
-                                first_audio_ms = round((time.perf_counter() - started) * 1000, 1)
+                        if delta:
+                            await text_queue.put(delta)
+
                     elif event.get("type") in {"tool_start", "tool_end"}:
                         logger.info(
                             "agent_event session=%s event=%s",
@@ -295,23 +324,14 @@ async def agent_turn_stream(request: AgentTurnRequest):
                         model_ms = event.get("model_ms")
                         ttft_ms = event.get("ttft_ms")
 
-        chunks, buffer = pop_speech_chunks(buffer, final=True, first_chunk=(chunk_count == 0))
-        for chunk in chunks:
-            logger.info(
-                "speech_chunk session=%s chunk=%d text=%s",
-                request.session_id,
-                chunk_count + 1,
-                json.dumps(chunk, ensure_ascii=False),
-            )
-            tts_started = time.perf_counter()
-            audio = await synthesize_audio(chunk)
-            tts_total_ms += round((time.perf_counter() - tts_started) * 1000, 1)
-            await broadcast_audio(audio)
-            chunk_count += 1
-            if first_audio_ms is None:
-                first_audio_ms = round((time.perf_counter() - started) * 1000, 1)
-    except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=502, detail=f"Streaming agent request failed: {exc}") from exc
+        await text_queue.put(None)
+        await tts_task
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError, websockets.exceptions.WebSocketException) as exc:
+        raise HTTPException(status_code=502, detail=f"Streaming voice pipeline failed: {exc}") from exc
+    finally:
+        if not tts_task.done():
+            tts_task.cancel()
+            await asyncio.gather(tts_task, return_exceptions=True)
 
     return {
         "status": "ok",
@@ -319,13 +339,10 @@ async def agent_turn_stream(request: AgentTurnRequest):
         "timing": {
             "ttft_ms": ttft_ms,
             "model_ms": model_ms,
-            "tts_total_ms": round(tts_total_ms, 1),
-            "first_chunk_ready_ms": first_chunk_ready_ms,
-            "first_chunk_words": first_chunk_words,
-            "first_tts_ms": first_tts_ms,
             "first_audio_ms": first_audio_ms,
             "total_ms": round((time.perf_counter() - started) * 1000, 1),
-            "chunks": chunk_count,
+            "tts_transport": "elevenlabs-websocket",
+            "tts_audio_chunks": audio_chunks,
         },
     }
 
