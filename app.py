@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -9,6 +11,7 @@ from pathlib import Path
 from typing import Set
 
 import httpx
+import websockets
 from fastapi import FastAPI, File, HTTPException, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +19,7 @@ from pydantic import BaseModel, Field
 from pywebpush import WebPushException, webpush
 
 app = FastAPI(title="voice-bridge", version="0.4.0")
+logger = logging.getLogger("uvicorn.error")
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
 DATA_DIR = Path(os.getenv("VOICE_BRIDGE_DATA_DIR", "/app/data"))
@@ -25,6 +29,9 @@ VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "")
 VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:push@tchx.dev")
 FISH_TTS_URL = "https://api.fish.audio/v1/tts"
 FISH_MODEL = "s2.1-pro-free"
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "8mBRP99B2Ng2QwsJMFQl")
+ELEVENLABS_STREAM_WORDS = int(os.getenv("ELEVENLABS_STREAM_WORDS", "7"))
 AGENT_URL = os.getenv("AGENT_URL", "").rstrip("/")
 AGENT_TIMEOUT_SECONDS = float(os.getenv("AGENT_TIMEOUT_SECONDS", "60"))
 STT_URL = os.getenv("STT_URL", "").rstrip("/")
@@ -121,7 +128,7 @@ async def health():
         "increment": "agent-session-bridge",
         "agent_configured": bool(AGENT_URL),
         "stt_configured": bool(STT_URL),
-        "tts_configured": bool(os.getenv("FISH_API_KEY")),
+        "tts_configured": bool(os.getenv("FISH_API_KEY") or os.getenv("ELEVENLABS_API_KEY") or Path(os.getenv("ELEVENLABS_API_KEY_FILE", "/run/secrets/elevenlabs_api_key")).exists()),
         "push_configured": bool(VAPID_PUBLIC_KEY and Path(VAPID_PRIVATE_KEY).exists()),
         "connected_clients": len(clients),
         "push_subscriptions": subscriptions,
@@ -162,6 +169,17 @@ async def stt_transcribe(file: UploadFile = File(...)):
 
     text = str(payload.get("text", "")).strip()
     elapsed_ms = round((time.perf_counter() - request_started) * 1000, 1)
+    logger.info(
+        "stt_transcript text=%r language=%s probability=%s audio_seconds=%s inference_seconds=%s total_ms=%s bytes=%s content_type=%s",
+        text,
+        payload.get("language"),
+        payload.get("language_probability"),
+        payload.get("audio_seconds"),
+        payload.get("inference_seconds"),
+        elapsed_ms,
+        len(audio),
+        content_type,
+    )
     return {"status": "ok", "text": text, "stt": payload, "timing": {"stt_ms": elapsed_ms}}
 
 
@@ -190,6 +208,143 @@ async def agent_turn(request: AgentTurnRequest):
         payload = {"status": "ok"}
     elapsed_ms = round((time.perf_counter() - request_started) * 1000, 1)
     return {"status": "ok", "agent": payload, "timing": {"agent_ms": elapsed_ms}}
+
+
+@app.post("/agent/turn/stream")
+async def agent_turn_stream(request: AgentTurnRequest):
+    if not AGENT_URL:
+        raise HTTPException(status_code=503, detail="AGENT_URL is not configured")
+
+    started = time.perf_counter()
+    output = ""
+    first_audio_ms = None
+    model_ms = None
+    ttft_ms = None
+
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
+    key_file = os.getenv("ELEVENLABS_API_KEY_FILE", "/run/secrets/elevenlabs_api_key")
+    if not elevenlabs_key:
+        try:
+            elevenlabs_key = Path(key_file).read_text().strip()
+        except OSError:
+            pass
+    if not elevenlabs_key:
+        raise HTTPException(status_code=503, detail="ELEVENLABS_API_KEY is not configured")
+
+    text_queue: asyncio.Queue[str | None | tuple[str, str]] = asyncio.Queue()
+    audio_chunks = 0
+
+    async def eleven_text_stream():
+        buffer = ""
+        while True:
+            delta = await text_queue.get()
+            if delta is None:
+                if buffer:
+                    yield buffer
+                return
+            if isinstance(delta, tuple) and delta[0] == "commentary":
+                if buffer:
+                    yield buffer
+                    buffer = ""
+                yield delta[1]
+                continue
+            buffer += delta
+            if len(buffer.split()) >= ELEVENLABS_STREAM_WORDS:
+                split_at = buffer.rfind(" ")
+                if split_at > 0:
+                    yield buffer[:split_at + 1]
+                    buffer = buffer[split_at + 1:]
+
+    async def elevenlabs_tts():
+        nonlocal first_audio_ms, audio_chunks
+        uri = (
+            f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input"
+            f"?model_id={ELEVENLABS_MODEL}&output_format=pcm_24000"
+        )
+        async with websockets.connect(uri, additional_headers={"xi-api-key": elevenlabs_key}) as ws:
+            await ws.send(json.dumps({
+                "text": " ",
+                "voice_settings": {"stability": 0.65, "similarity_boost": 0.8, "style": 0.0, "use_speaker_boost": True},
+                "generation_config": {"chunk_length_schedule": [50, 90, 120, 150]},
+            }))
+            async def sender():
+                async for text_part in eleven_text_stream():
+                    await ws.send(json.dumps({"text": text_part, "try_trigger_generation": True}))
+                await ws.send(json.dumps({"text": ""}))
+            send_task = asyncio.create_task(sender())
+            try:
+                async for message in ws:
+                    data = json.loads(message)
+                    encoded = data.get("audio")
+                    if encoded:
+                        audio = base64.b64decode(encoded)
+                        if first_audio_ms is None:
+                            first_audio_ms = round((time.perf_counter() - started) * 1000, 1)
+                        audio_chunks += 1
+                        delivered = await broadcast_audio(audio)
+                        logger.info("tts_audio_chunk chunk=%d bytes=%d delivered=%d", audio_chunks, len(audio), delivered)
+                    if data.get("isFinal"):
+                        break
+            finally:
+                await send_task
+
+    tts_task = asyncio.create_task(elevenlabs_tts())
+    try:
+        async with httpx.AsyncClient(timeout=AGENT_TIMEOUT_SECONDS) as client:
+            async with client.stream(
+                "POST",
+                f"{AGENT_URL}/turn/stream",
+                json={"session_id": request.session_id, "text": request.text},
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    event = json.loads(line)
+                    if event.get("type") == "commentary":
+                        commentary = str(event.get("text", ""))
+                        output += commentary
+                        if commentary:
+                            await text_queue.put(("commentary", commentary))
+                        logger.info("agent_commentary session=%s text=%s", request.session_id, json.dumps(commentary, ensure_ascii=False))
+                        continue
+                    if event.get("type") == "delta":
+                        delta = str(event.get("text", ""))
+                        output += delta
+                        if delta:
+                            await text_queue.put(delta)
+
+                    elif event.get("type") in {"tool_start", "tool_end"}:
+                        logger.info(
+                            "agent_event session=%s event=%s",
+                            request.session_id,
+                            json.dumps(event, ensure_ascii=False),
+                        )
+                    elif event.get("type") == "done":
+                        model_ms = event.get("model_ms")
+                        ttft_ms = event.get("ttft_ms")
+
+        await text_queue.put(None)
+        await tts_task
+    except (httpx.HTTPError, ValueError, json.JSONDecodeError, websockets.exceptions.WebSocketException) as exc:
+        raise HTTPException(status_code=502, detail=f"Streaming voice pipeline failed: {exc}") from exc
+    finally:
+        if not tts_task.done():
+            tts_task.cancel()
+            await asyncio.gather(tts_task, return_exceptions=True)
+
+    return {
+        "status": "ok",
+        "agent": {"output": output, "spoken": True},
+        "timing": {
+            "ttft_ms": ttft_ms,
+            "model_ms": model_ms,
+            "first_audio_ms": first_audio_ms,
+            "total_ms": round((time.perf_counter() - started) * 1000, 1),
+            "tts_transport": "elevenlabs-websocket",
+            "tts_audio_chunks": audio_chunks,
+        },
+    }
 
 
 @app.get("/push/public-key")

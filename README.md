@@ -1,180 +1,74 @@
 # voice-bridge
 
-Minimal, Dockerized voice bridge for experimenting with browser voice interfaces and pluggable agent backends.
+Dockerized voice transport for Jarvis. Voice Bridge owns browser push-to-talk, local STT forwarding, streaming TTS delivery, and push-alert audio. The conversational agent runtime is external.
 
 ## Current architecture
 
 ```text
-Browser microphone -> Browser Web Speech API -> transcript
-
-External caller / agent
-        |
-        v
-   POST /speak
-        |
-        v
- Fish Audio TTS
-        |
-        v
-   WebSocket /ws
-        |
-        v
- Browser playback
+Browser PTT -> Voice Bridge -> local Whisper STT -> Jarvis agent /turn/stream
+                                                   |
+                                                   +-> text deltas/commentary
+                                                           |
+                                                           v
+                                              ElevenLabs WebSocket TTS
+                                                           |
+                                                     PCM 24 kHz
+                                                           |
+                                              Voice Bridge WS /ws
+                                                           |
+                                              Desktop Web Audio playback
 ```
 
-The browser speech input and agent voice output are intentionally separate. `/speak` is the shared output channel that can be called by ChatGPT through the CME host, an OpenAI Agents SDK runtime, PydanticAI, cron jobs, or another service later.
+Tool commentary is emitted by the conversational agent as a separate event and is sent immediately to the same ElevenLabs streaming session before the tool executes. Normal response deltas are buffered lightly before being sent to ElevenLabs to preserve natural speech.
 
-## Increment 1 — Web STT
+## Audio paths
 
-- Mobile-first web UI
-- Microphone permission request
-- Push-to-talk interaction
-- Interim and final browser transcription
+Conversational turns use one ElevenLabs WebSocket session per turn and stream raw PCM 24 kHz to the browser. Desktop Web Audio is the reference client for this path.
 
-## Increment 2 — Fish Audio TTS channel
+Alerts and the legacy `POST /speak` endpoint remain on Fish Audio MP3 and use HTMLAudio playback. They are intentionally separate from conversational streaming.
 
-- `POST /speak` accepts text
-- Fish Audio synthesizes MP3 with `s2.1-pro-free`
-- The server pushes generated audio to connected browsers over `WS /ws`
-- The browser plays the received MP3
-- Optional `reference_id` can be supplied per request or configured as `FISH_REFERENCE_ID`
+The iOS web/PWA client is currently best-effort. iOS may suspend Web Audio after microphone capture; the target mobile client is native iOS, so no iOS-specific Web Audio keep-alive hacks are maintained in this bridge.
 
 ## Configuration
 
-Create the local environment file:
+Copy `.env.example` to `.env`. Secrets must stay outside the repository. ElevenLabs is mounted read-only from `ELEVENLABS_API_KEY_PATH`; Fish remains optional for alerts and `/speak`.
 
-```bash
-cp .env.example .env
-```
-
-Then set your Fish Audio API key in `.env`:
+Important settings:
 
 ```dotenv
-FISH_API_KEY=your_key_here
-```
-
-Do not put the key in the frontend or commit `.env` to Git.
-
-Optionally set a default Fish Audio reference ID:
-
-```dotenv
-FISH_REFERENCE_ID=your_reference_id
+AGENT_URL=http://host.docker.internal:8781
+STT_URL=http://cme-whisper-stt:8000
+ELEVENLABS_API_KEY_PATH=/home/ubuntu/elevenlabsapikey
+ELEVENLABS_MODEL=eleven_flash_v2_5
+ELEVENLABS_VOICE_ID=8mBRP99B2Ng2QwsJMFQl
+ELEVENLABS_STREAM_WORDS=7
 ```
 
 ## Run
 
 ```bash
 docker compose up -d --build
+curl http://127.0.0.1:8765/health
 ```
 
-The container listens on port `8000` internally. By default, Compose publishes the app on `127.0.0.1:8765`.
+The container listens on port 8000 internally and defaults to `127.0.0.1:8765` on the host.
 
-Tailscale Serve can expose that local endpoint over tailnet-only HTTPS.
+## Main endpoints
 
-## API
+- `GET /health` — runtime/configuration state.
+- `POST /stt/transcribe` — forwards recorded audio to local STT with Spanish selected.
+- `POST /agent/turn/stream` — streams the agent response into ElevenLabs and broadcasts PCM to connected clients.
+- `POST /agent/turn` — non-streaming agent bridge retained for compatibility.
+- `WS /ws` — binary audio channel. Conversational audio is PCM; message/alert audio is preceded by `voice-message` metadata and remains MP3.
+- `POST /speak` — legacy/utility Fish Audio MP3 synthesis.
+- `POST /messages` and `/messages/*` — persistent push-alert flow.
 
-### `GET /health`
+## Browser client
 
-Returns service state, whether TTS is configured, and the number of connected browser clients.
+PTT uses MediaRecorder with periodic data emission plus a final `requestData()` before stop so the uploaded recording is complete. Conversational PCM is scheduled sequentially through Web Audio. Alert MP3 continues through a persistent HTMLAudio element.
 
-### `POST /speak`
+Desktop Chromium is the current reference environment. Native iOS is the intended mobile architecture; the PWA is not treated as the long-term iOS audio runtime.
 
-Request:
+## Security
 
-```json
-{
-  "text": "Hello from Voice Bridge"
-}
-```
-
-Optional per-request voice:
-
-```json
-{
-  "text": "Hello from Voice Bridge",
-  "reference_id": "fish_reference_id"
-}
-```
-
-Response:
-
-```json
-{
-  "status": "ok",
-  "model": "s2.1-pro-free",
-  "format": "mp3",
-  "bytes": 12345,
-  "delivered_to": 1
-}
-```
-
-### `WS /ws`
-
-Persistent browser voice-output channel. Binary messages are MP3 payloads generated by Fish Audio.
-
-## Browser support
-
-The STT experiment uses `SpeechRecognition` / `webkitSpeechRecognition`, so Chromium-based browsers such as Chrome or Edge are the intended clients.
-
-## PWA push alerts
-
-Voice Bridge can be installed as a Progressive Web App and receive Web Push alerts while the UI is not open.
-
-Alert flow:
-
-```text
-POST /messages
-    -> persist pending message
-    -> Web Push notification
-    -> user taps notification
-    -> Voice Bridge opens
-    -> GET /messages/{id}/audio
-    -> Fish Audio TTS
-    -> browser playback
-    -> POST /messages/{id}/ack
-```
-
-### iPhone / iPad setup
-
-1. Open the HTTPS Voice Bridge URL in Safari.
-2. Add it to the Home Screen and open the installed `TCHX Voice` app.
-3. Tap `Enable alerts` and allow notifications.
-4. Lock the phone.
-5. Send a message through `POST /messages`.
-6. Tap the notification to open Voice Bridge and hear the pending message.
-
-Web Push on iOS/iPadOS requires the web app to be installed on the Home Screen and notification permission must be requested from a direct user interaction.
-
-### Send an alert
-
-```bash
-curl -X POST http://127.0.0.1:8765/messages \
-  -H 'Content-Type: application/json' \
-  -d '{"title":"TCHX Voice","text":"CME-01 requires your attention."}'
-```
-
-### Push configuration
-
-A VAPID private key is stored locally under `data/` and is never committed. The corresponding public key is configured in `.env` as `VAPID_PUBLIC_KEY`.
-
-Persistent runtime state is stored in `data/voice_bridge.db`, including push subscriptions and pending messages.
-## Agent bridge
-
-Voice Bridge does not run an agent runtime. It only forwards finalized STT turns to a configured agent endpoint and remains the shared TTS output channel.
-
-```text
-Browser STT -> Voice Bridge -> Agent endpoint
-                              -> runtime/model/tools
-Agent endpoint -> Voice Bridge /speak -> browser audio
-```
-
-Configure `AGENT_URL` to the base URL of an adapter that accepts `POST /turn`:
-
-```json
-{
-  "session_id": "stable-browser-session-id",
-  "text": "user utterance"
-}
-```
-
-Conversation history and session lifetime belong to the agent adapter, not Voice Bridge. The browser keeps a stable opaque session ID in local storage and sends it with each finalized push-to-talk utterance.
+Do not commit API keys, VAPID private keys, `.env`, or runtime data. The ElevenLabs key is read from a read-only mounted file by default. Persistent push state lives under `data/voice_bridge.db`.
